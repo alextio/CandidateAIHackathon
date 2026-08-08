@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Texas Grid · Project Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #06090d;
+      --panel: rgba(9, 13, 18, 0.82);
+      --border: rgba(120, 200, 220, 0.16);
+      --ink: #e9eef3;
+      --muted: #78899a;
+      --faint: #4a5765;
+      --accent: #2ad4ee;          /* electric cyan — chrome only */
+      --accent-dim: rgba(42, 212, 238, 0.14);
+      --queued: #8b98a9;          /* muted slate */
+      --permitting: #ffb020;      /* amber */
+      --permit-only: #4c9bff;     /* blue */
+      --display: "Space Grotesk", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); }
+    body { font-family: var(--mono); -webkit-font-smoothing: antialiased; }
+    #map { position: absolute; inset: 0; }
+    /* focus edge-vignette to pull the eye to the data */
+    #vignette {
+      position: absolute; inset: 0; pointer-events: none; z-index: 5;
+      box-shadow: inset 0 0 220px 40px rgba(3, 6, 9, 0.85);
+    }
+
+    /* ── Console panel ─────────────────────────────────────────── */
+    #panel {
+      position: absolute; top: 18px; left: 18px; z-index: 10;
+      width: 288px; max-height: calc(100% - 36px); overflow: auto;
+      background: var(--panel); backdrop-filter: blur(14px) saturate(1.2);
+      border: 1px solid var(--border); border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255,255,255,0.04);
+      padding: 18px 18px 20px;
+    }
+    .eyebrow {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 10.5px; letter-spacing: 0.22em; text-transform: uppercase;
+      color: var(--accent); font-weight: 500;
+    }
+    .live-dot {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+      box-shadow: 0 0 0 0 rgba(42, 212, 238, 0.6); animation: pulse 2.4s ease-out infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(42, 212, 238, 0.55); }
+      70% { box-shadow: 0 0 0 7px rgba(42, 212, 238, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(42, 212, 238, 0); }
+    }
+    h1 {
+      font-family: var(--display); font-weight: 700; font-size: 25px; line-height: 1.05;
+      letter-spacing: -0.01em; margin: 10px 0 3px;
+    }
+    .tagline { color: var(--muted); font-size: 11.5px; letter-spacing: 0.01em; }
+
+    /* Hero readout */
+    .readout { margin: 18px 0 4px; }
+    .readout .num {
+      font-family: var(--display); font-weight: 600; font-size: 46px; line-height: 1;
+      letter-spacing: -0.02em; color: var(--ink);
+      font-variant-numeric: tabular-nums; font-feature-settings: "tnum";
+    }
+    .readout .num.loading { color: var(--faint); }
+    .readout .cap {
+      font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase;
+      color: var(--muted); margin-top: 7px;
+    }
+    .readout .split { font-size: 11.5px; color: var(--faint); margin-top: 5px; }
+    .readout .split b { color: var(--muted); font-weight: 500; }
+
+    .rule { height: 1px; background: linear-gradient(90deg, var(--border), transparent); margin: 18px 0; border: 0; }
+
+    /* Controls */
+    .field { margin: 13px 0; }
+    .field > span {
+      display: block; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 6px;
+    }
+    select, input[type="number"] {
+      width: 100%; font-family: var(--mono); font-size: 12.5px; color: var(--ink);
+      background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 10px; transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    select:hover, input[type="number"]:hover { border-color: rgba(120, 200, 220, 0.3); }
+    select:focus-visible, input:focus-visible, button:focus-visible, .check:focus-within {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .check {
+      display: flex; align-items: center; gap: 9px; margin: 14px 0 4px;
+      font-size: 12.5px; color: var(--ink); cursor: pointer; user-select: none;
+    }
+    .check input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+    button#apply {
+      width: 100%; margin-top: 16px; font-family: var(--mono); font-weight: 600;
+      font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
+      color: var(--bg); background: var(--accent); border: 0; border-radius: 8px;
+      padding: 11px; cursor: pointer; transition: filter 0.15s, transform 0.05s;
+    }
+    button#apply:hover { filter: brightness(1.12); }
+    button#apply:active { transform: translateY(1px); }
+
+    /* Signal key */
+    .key-title { font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+    .key-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 12px; color: var(--ink); }
+    .key-row .swatch { width: 11px; height: 11px; border-radius: 50%; flex: 0 0 auto; }
+    .key-row.q .swatch { background: var(--queued); box-shadow: 0 0 8px 1px var(--queued); }
+    .key-row.p .swatch { background: var(--permitting); box-shadow: 0 0 9px 1px var(--permitting); }
+    .key-row.o .swatch { background: var(--permit-only); box-shadow: 0 0 9px 1px var(--permit-only); }
+    .key-note { font-size: 10.5px; color: var(--faint); margin-top: 11px; line-height: 1.5; }
+
+    #err {
+      display: none; margin-top: 14px; padding: 10px 12px; font-size: 11.5px; line-height: 1.5;
+      color: #ffb4a8; background: rgba(255, 90, 70, 0.08);
+      border: 1px solid rgba(255, 90, 70, 0.25); border-radius: 8px;
+    }
+
+    /* Popup */
+    .maplibregl-popup-content {
+      background: var(--panel); backdrop-filter: blur(14px); color: var(--ink);
+      border: 1px solid var(--border); border-radius: 11px; padding: 13px 15px;
+      box-shadow: 0 12px 34px rgba(0,0,0,0.55); max-width: 250px; font-family: var(--mono);
+    }
+    .maplibregl-popup-content strong { font-family: var(--display); font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+    .maplibregl-popup-close-button { color: var(--muted); font-size: 18px; padding: 2px 7px; }
+    .maplibregl-popup-tip { border-top-color: var(--panel) !important; border-bottom-color: var(--panel) !important; }
+    .pop-stage {
+      display: inline-block; margin-top: 8px; font-size: 9.5px; letter-spacing: 0.14em;
+      text-transform: uppercase; padding: 3px 8px; border-radius: 999px;
+    }
+    .pop-meta { color: var(--muted); margin-top: 8px; font-size: 11.5px; line-height: 1.5; }
+    .pop-approx { color: var(--permitting); font-size: 10.5px; margin-top: 8px; }
+
+    /* MapLibre chrome tuned for dark */
+    .maplibregl-ctrl-group { background: var(--panel) !important; border: 1px solid var(--border) !important; }
+    .maplibregl-ctrl-group button + button { border-top: 1px solid var(--border) !important; }
+    .maplibregl-ctrl button .maplibregl-ctrl-icon { filter: invert(0.85); }
+    .maplibregl-ctrl-attrib { background: rgba(6, 9, 13, 0.7) !important; }
+    .maplibregl-ctrl-attrib a { color: var(--faint) !important; }
+
+    @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } * { transition: none !important; } }
+    @media (max-width: 560px) { #panel { width: calc(100% - 24px); top: 12px; left: 12px; } }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="vignette"></div>
+
+  <section id="panel">
+    <div class="eyebrow"><span class="live-dot"></span> Live · Texas grid</div>
+    <h1>Project Map</h1>
+    <div class="tagline">TCEQ air permits × ERCOT queue</div>
+
+    <div class="readout">
+      <div class="num loading" id="count-total">—</div>
+      <div class="cap">Projects mapped</div>
+      <div class="split" id="count-split">Awaiting feed…</div>
+    </div>
+
+    <hr class="rule" />
+
+    <div class="field">
+      <span>Source</span>
+      <select id="source">
+        <option value="all">All sources</option>
+        <option value="tceq">TCEQ permits</option>
+        <option value="ercot">ERCOT queue</option>
+      </select>
+    </div>
+    <div class="field">
+      <span>Stage</span>
+      <select id="stage">
+        <option value="">Any stage</option>
+        <option value="queued">Queued</option>
+        <option value="permitting">Permitting</option>
+        <option value="permit_only">Permit only</option>
+      </select>
+    </div>
+    <div class="field">
+      <span>Min capacity — MW</span>
+      <input type="number" id="min_mw" min="0" step="10" placeholder="any" />
+    </div>
+    <label class="check">
+      <input type="checkbox" id="on_thesis" /> Power generation only
+    </label>
+    <button id="apply">Apply filters</button>
+
+    <hr class="rule" />
+
+    <div class="key-title">Signal key</div>
+    <div class="key-row q"><span class="swatch"></span> Queued — ERCOT only</div>
+    <div class="key-row p"><span class="swatch"></span> Permitting</div>
+    <div class="key-row o"><span class="swatch"></span> Permit only</div>
+    <div class="key-note">Node size scales with capacity. Dimmed nodes are placed on the county centroid (approximate).</div>
+
+    <div id="err"></div>
+  </section>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script>
+    const API_BASE = new URLSearchParams(location.search).get("api") || "http://localhost:8000";
+
+    const STAGE = {
+      queued:      { color: "#8b98a9", label: "Queued" },
+      permitting:  { color: "#ffb020", label: "Permitting" },
+      permit_only: { color: "#4c9bff", label: "Permit only" },
+    };
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+      center: [-99.4, 31.2],
+      zoom: 5.1,
+      attributionControl: { compact: true },
+    });
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+
+    const fmt = (n) => (n ?? 0).toLocaleString("en-US");
+
+    function buildUrl() {
+      const p = new URLSearchParams();
+      p.set("source", document.getElementById("source").value);
+      const stage = document.getElementById("stage").value;
+      if (stage) p.set("stage", stage);
+      const minMw = document.getElementById("min_mw").value;
+      if (minMw) p.set("min_mw", minMw);
+      if (document.getElementById("on_thesis").checked) p.set("on_thesis", "true");
+      return `${API_BASE}/map?${p.toString()}`;
+    }
+
+    async function load() {
+      const err = document.getElementById("err");
+      err.style.display = "none";
+      try {
+        const res = await fetch(buildUrl());
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(`${res.status} ${res.statusText}${body.detail ? " — " + body.detail : ""}`);
+        }
+        const gj = await res.json();
+        map.getSource("projects").setData(gj);
+
+        const c = gj.meta?.counts || {};
+        const total = document.getElementById("count-total");
+        total.textContent = fmt(c.total);
+        total.classList.toggle("loading", !c.total);
+        document.getElementById("count-split").innerHTML =
+          `<b>${fmt(c.exact)}</b> exact · <b>${fmt(c.county)}</b> approximate`;
+
+        if (gj.features?.length) {
+          const b = new maplibregl.LngLatBounds();
+          for (const f of gj.features) b.extend(f.geometry.coordinates);
+          map.fitBounds(b, { padding: { top: 60, right: 60, bottom: 60, left: 340 }, maxZoom: 8.5, duration: 700 });
+        }
+      } catch (e) {
+        err.textContent = `Couldn't reach the feed: ${e.message}. Confirm the backend is up on ${API_BASE} with Supabase configured and a discovery run completed.`;
+        err.style.display = "block";
+      }
+    }
+
+    map.on("load", () => {
+      map.addSource("projects", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+
+      const stageColor = [
+        "match", ["get", "stage"],
+        "queued", STAGE.queued.color,
+        "permitting", STAGE.permitting.color,
+        "permit_only", STAGE.permit_only.color,
+        "#64748b",
+      ];
+      // Node size scales with capacity; projects with no MW get a small base node.
+      const sizeByCapacity = [
+        "interpolate", ["linear"], ["coalesce", ["get", "capacity_mw"], 0],
+        0, 4, 100, 6.5, 500, 10, 1500, 15,
+      ];
+      const approxDim = ["case", ["==", ["get", "precision"], "county"], 0.55, 1];
+
+      // Glow halo (energized grid node) beneath the solid node.
+      map.addLayer({
+        id: "project-glow",
+        type: "circle",
+        source: "projects",
+        paint: {
+          "circle-color": stageColor,
+          "circle-radius": ["*", sizeByCapacity, 2.4],
+          "circle-blur": 1,
+          "circle-opacity": ["*", 0.35, approxDim],
+        },
+      });
+      map.addLayer({
+        id: "project-pins",
+        type: "circle",
+        source: "projects",
+        paint: {
+          "circle-color": stageColor,
+          "circle-radius": sizeByCapacity,
+          "circle-opacity": ["*", 0.95, approxDim],
+          "circle-stroke-width": ["case", ["==", ["get", "precision"], "exact"], 1.4, 0.6],
+          "circle-stroke-color": "rgba(255,255,255,0.85)",
+        },
+      });
+
+      map.on("click", "project-pins", (e) => {
+        const p = e.features[0].properties;
+        const s = STAGE[p.stage] || { color: "#64748b", label: p.stage };
+        const mw = p.capacity_mw != null && p.capacity_mw !== "" ? `${fmt(Number(p.capacity_mw))} MW` : "capacity n/a";
+        const bits = [mw, p.fuel, p.technology].filter(Boolean).join(" · ");
+        const approx = p.precision === "county" ? `<div class="pop-approx">△ approximate — county centroid</div>` : "";
+        new maplibregl.Popup({ closeButton: true, offset: 12 })
+          .setLngLat(e.lngLat)
+          .setHTML(
+            `<strong>${p.name || "Unknown operator"}</strong>` +
+            `<div><span class="pop-stage" style="background:${s.color}22;color:${s.color}">${s.label}</span></div>` +
+            `<div class="pop-meta">${p.county || "?"} County, TX<br>${bits}</div>` +
+            approx
+          )
+          .addTo(map);
+      });
+      map.on("mouseenter", "project-pins", () => (map.getCanvas().style.cursor = "pointer"));
+      map.on("mouseleave", "project-pins", () => (map.getCanvas().style.cursor = ""));
+
+      load();
+    });
+
+    document.getElementById("apply").addEventListener("click", load);
+  </script>
+</body>
+</html>

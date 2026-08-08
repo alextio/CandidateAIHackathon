@@ -9,6 +9,7 @@ callers fall back to the county centroid for those.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -42,30 +43,48 @@ def _valid(lat, lng) -> bool:
     return 25.0 <= float(lat) <= 37.0 and -107.0 <= float(lng) <= -93.0
 
 
+def _query_batch(
+    client: httpx.Client, chunk: list[str], *, retries: int = 2
+) -> dict | None:
+    """POST one batch to FRS, retrying transient errors. None if it never succeeds."""
+    where = f"PGM_SYS_ACRNM='{TCEQ_ACRONYM}' AND PGM_SYS_ID IN ({_quote_in(chunk)})"
+    for attempt in range(retries + 1):
+        try:
+            resp = client.post(
+                FRS_QUERY_URL,
+                data={
+                    "where": where,
+                    "outFields": "PGM_SYS_ID,LATITUDE83,LONGITUDE83,ACCURACY_VALUE",
+                    "returnGeometry": "false",
+                    "f": "json",
+                },
+                timeout=90,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.HTTPError, ValueError):
+            if attempt == retries:
+                return None  # give up on this batch; its RNs fall back to centroid
+            time.sleep(1.5 * (attempt + 1))
+    return None
+
+
 def geocode_rns(
     client: httpx.Client, rns: list[str], *, batch_size: int = _BATCH
 ) -> dict[str, GeoPoint]:
-    """Look up coordinates for TCEQ RN numbers. Returns {rn: GeoPoint} for hits."""
+    """Look up coordinates for TCEQ RN numbers. Returns {rn: GeoPoint} for hits.
+
+    Resilient by design: a batch that keeps failing is skipped (those RNs simply
+    stay un-geocoded and fall back to the county centroid) rather than aborting
+    the whole run — important at statewide scale (~2k requests).
+    """
     unique = sorted({rn for rn in rns if rn})
     out: dict[str, GeoPoint] = {}
     for start in range(0, len(unique), batch_size):
         chunk = unique[start : start + batch_size]
-        where = (
-            f"PGM_SYS_ACRNM='{TCEQ_ACRONYM}' AND "
-            f"PGM_SYS_ID IN ({_quote_in(chunk)})"
-        )
-        resp = client.post(
-            FRS_QUERY_URL,
-            data={
-                "where": where,
-                "outFields": "PGM_SYS_ID,LATITUDE83,LONGITUDE83,ACCURACY_VALUE",
-                "returnGeometry": "false",
-                "f": "json",
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+        payload = _query_batch(client, chunk)
+        if payload is None:
+            continue
         for feat in payload.get("features", []):
             attrs = feat.get("attributes", {})
             rn = attrs.get("PGM_SYS_ID")

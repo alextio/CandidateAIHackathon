@@ -8,6 +8,7 @@ They are public (no auth) and expose Socrata's SODA query API, so we filter to
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -38,6 +39,22 @@ class RegionRows:
     rows: list[dict]
 
 
+def _get_page(
+    client: httpx.Client, dataset_id: str, params: dict, *, retries: int = 3
+) -> list[dict]:
+    """GET one Socrata page, retrying transient network/5xx errors."""
+    for attempt in range(retries + 1):
+        try:
+            resp = client.get(f"{SODA_BASE}/{dataset_id}.json", params=params, timeout=90)
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.HTTPError, ValueError):
+            if attempt == retries:
+                raise  # exhausted retries — let the caller see the failure
+            time.sleep(2 * (attempt + 1))
+    return []
+
+
 def fetch_region(
     client: httpx.Client,
     region: str,
@@ -57,18 +74,13 @@ def fetch_region(
             if remaining <= 0:
                 break
             limit = min(page_size, remaining)
-        resp = client.get(
-            f"{SODA_BASE}/{dataset_id}.json",
-            params={
-                "program_code": program_code,
-                "$limit": limit,
-                "$offset": offset,
-                "$order": ":id",  # stable pagination order
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        batch = resp.json()
+        params = {
+            "program_code": program_code,
+            "$limit": limit,
+            "$offset": offset,
+            "$order": ":id",  # stable pagination order
+        }
+        batch = _get_page(client, dataset_id, params)
         if not batch:
             break
         rows.extend(batch)
