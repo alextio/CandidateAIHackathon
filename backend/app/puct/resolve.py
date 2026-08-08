@@ -135,7 +135,9 @@ def resolve_records(
     times in a docket resolves once; a party active in several dockets yields one
     link per docket, so the map can bump every project it touches.
     """
-    ercot_index = build_ercot_index(ercot_rows)
+    # build_ercot_index returns a county-blocked dict (county gate is for TCEQ);
+    # PUCT filings carry no county, so flatten every bucket into one candidate list.
+    ercot_index = [e for bucket in build_ercot_index(ercot_rows).values() for e in bucket]
     tceq_index = build_tceq_index(tceq_rows)
 
     seen: dict[tuple[str, str], PuctLinkResult] = {}

@@ -184,6 +184,24 @@
 
     .d-sec-title { font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); margin: 18px 0 10px; display: flex; justify-content: space-between; }
 
+    /* ML stage prediction */
+    .d-pred { margin: 15px 0; border: 1px solid var(--border); border-radius: 9px; padding: 12px 13px; background: rgba(9,13,18,0.6); }
+    .d-pred-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .d-pred-stage { font-family: var(--display); font-size: 15px; font-weight: 600; color: var(--ink); }
+    .d-pred-conf { font-family: var(--display); font-size: 15px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+    .d-pred-conf small { font-size: 10px; color: var(--muted); font-weight: 400; }
+    .d-pred-sub { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-top: 3px; display: flex; justify-content: space-between; }
+    .d-pred-warn { color: var(--permitting); }
+    .d-probs { margin-top: 11px; display: flex; flex-direction: column; gap: 6px; }
+    .d-prob { display: grid; grid-template-columns: 92px 1fr 34px; align-items: center; gap: 8px; font-size: 10.5px; }
+    .d-prob .pl { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .d-prob.top .pl { color: var(--ink); }
+    .d-prob-bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .d-prob-bar > i { display: block; height: 100%; background: rgba(255,255,255,0.22); border-radius: 3px; }
+    .d-prob.top .d-prob-bar > i { background: var(--accent); box-shadow: 0 0 7px 0 var(--accent-dim); }
+    .d-prob .pv { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .d-prob.top .pv { color: var(--ink); }
+
     /* timeline */
     .tl { position: relative; margin-left: 6px; padding-left: 16px; border-left: 1px solid var(--border); }
     .tl-item { position: relative; padding: 0 0 13px; }
@@ -515,6 +533,37 @@
       }
     }
 
+    // ML stage classifier: predicted lifecycle stage, confidence, and the
+    // calibrated per-class probability breakdown. Absent until POST /classify
+    // has scored this project.
+    function predictionBlock(pred) {
+      if (!pred || !pred.stage) return "";
+      const conf = pred.confidence != null
+        ? `${Math.round(Number(pred.confidence) * 100)}<small>%</small>` : "—";
+      const probs = (pred.probabilities || []).slice(0, 5);
+      const bars = probs.map((p, i) => {
+        const pct = Math.round(Number(p.probability || 0) * 100);
+        return `<div class="d-prob ${i === 0 ? "top" : ""}">
+          <span class="pl">${esc(p.label || p.stage)}</span>
+          <span class="d-prob-bar"><i style="width:${pct}%"></i></span>
+          <span class="pv">${pct}%</span>
+        </div>`;
+      }).join("");
+      const note = pred.rule_stage && !pred.agrees_with_rule
+        ? `<span class="d-pred-warn">Rule says ${esc(pred.rule_stage)}</span>`
+        : (pred.withdrawn ? `<span class="d-pred-warn">Flagged withdrawn</span>` : `<span>Model prediction</span>`);
+      const asOf = pred.as_of ? `<span>as of ${fmtDate(pred.as_of)}</span>` : `<span></span>`;
+      return `<div class="d-sec-title">Predicted stage <span>${esc(pred.model_version || "model")}</span></div>` +
+        `<div class="d-pred">
+          <div class="d-pred-head">
+            <span class="d-pred-stage">${esc(pred.stage_label || pred.stage)}</span>
+            <span class="d-pred-conf">${conf} <small>confidence</small></span>
+          </div>
+          <div class="d-pred-sub">${note}${asOf}</div>
+          <div class="d-probs">${bars}</div>
+        </div>`;
+    }
+
     function renderDossier(d, s) {
       const conf = d.match_confidence != null
         ? `${Math.round(Number(d.match_confidence) * 100)}<small>%</small>` : "—";
@@ -527,6 +576,8 @@
         cell("Study phase", esc(d.gim_study_phase || "—")) +
         cell("Projected COD", d.projected_cod ? fmtDate(d.projected_cod) : "—") +
         cell("Link confidence", conf);
+
+      const pred = predictionBlock(d.stage_prediction);
 
       const timeline = d.timeline || [];
       const tl = timeline.length ? `<div class="tl">` + timeline.map((t) => {
@@ -553,6 +604,7 @@
 
       document.getElementById("d-rest").innerHTML =
         `<div class="d-grid">${grid}</div>` +
+        pred +
         `<div class="d-sec-title">Timeline <span>${timeline.filter((t) => !t.future).length} events</span></div>` +
         tl +
         `<div class="d-sec-title">TCEQ air permits <span>${permits.length}</span></div>` +

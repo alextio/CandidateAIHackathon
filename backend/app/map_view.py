@@ -17,6 +17,7 @@ the map can style and rank pins without re-deriving anything client-side.
 """
 from __future__ import annotations
 
+import time
 from datetime import date
 from typing import Any
 
@@ -24,6 +25,27 @@ from supabase import Client
 
 from .geo.county_centroids import centroid
 from .tceq.db import ERCOT_TABLE, EVENTS_TABLE, LINKS_TABLE, PERMITS_TABLE
+
+# One-row-per-project view over ERCOT_TABLE's snapshot history (migration 0005).
+ERCOT_LATEST_VIEW = "ercot_projects_latest"
+
+# ML stage classifier output (migration 0004). Keyed by the synthetic entity id
+# `ercot:<inr>` this pipeline writes for every ERCOT-only project.
+PREDICTIONS_TABLE = "stage_predictions"
+
+# Human labels for the classifier's 8-class lifecycle (app.classify.stages.Stage),
+# ordered earliest -> latest. Distinct from the funnel STAGE_* above: that is a
+# rule-based maturity read-out for pin colour, this is the model's prediction.
+PREDICTED_STAGE_LABELS = {
+    "concept": "Concept",
+    "fel1": "FEL1 — early planning",
+    "fel2_prefeed": "FEL2 — pre-FEED",
+    "feed": "FEED",
+    "interconnection_agreement": "Interconnection agreement",
+    "fid": "Final investment decision",
+    "construction": "Construction",
+    "cod": "Commercial operation",
+}
 
 # Funnel stages, in order of increasing maturity. Every project sits at the
 # furthest stage it has reached — the pin colour is a maturity read-out.
@@ -86,36 +108,90 @@ def _chunks(seq: list[str], n: int = _IN_CHUNK):
 
 
 def _load_ercot(client: Client) -> dict[str, dict]:
-    """inr -> latest ercot_projects row, plus the earliest snapshot we've seen.
+    """inr -> current ercot_projects row, plus the earliest snapshot we've seen.
 
-    Rows come newest-first, so the first row per `inr` is its current state; we
-    keep scanning every snapshot to remember the earliest `report_date` for that
-    project (its dwell time in our snapshots).
+    Reads from the ``ercot_projects_latest`` view (migration 0005), which
+    collapses the snapshot history to one row per project server-side — current
+    state plus ``first_report`` (earliest ``report_date``, i.e. dwell time). This
+    keeps the map load at ~one row per project instead of scanning every
+    project × snapshot and deduping in Python.
     """
     rows = _paginate(
-        lambda: client.table(ERCOT_TABLE)
+        lambda: client.table(ERCOT_LATEST_VIEW)
         .select(
             "inr,project_name,interconnecting_entity,poi_location,county,"
             "cdr_reporting_zone,size_category,status,capacity_mw,"
             "fuel,fuel_label,technology,technology_label,gim_study_phase,"
             "projected_cod,ia_signed,approved_for_energization,"
-            "approved_for_synchronization,inactive_date,cancel_date,report_date"
+            "approved_for_synchronization,inactive_date,cancel_date,report_date,"
+            "first_report"
         )
-        .order("report_date", desc=True)
-        .order("inr")  # stable tiebreak so pagination can't drop/repeat rows
+        .order("inr")  # stable ordering so pagination can't drop/repeat rows
     )
     out: dict[str, dict] = {}
     for row in rows:
         inr = row.get("inr")
         if not inr:
             continue
-        rd = row.get("report_date")
-        if inr not in out:
-            row["_first_report"] = rd
-            out[inr] = row
-        elif rd and (out[inr]["_first_report"] is None or rd < out[inr]["_first_report"]):
-            out[inr]["_first_report"] = rd
+        row["_first_report"] = row.get("first_report")
+        out[inr] = row
     return out
+
+
+def _load_prediction(client: Client, inr: str) -> dict | None:
+    """Newest ML stage prediction for one project, or None if never scored.
+
+    Scoped to this `inr` via the synthetic `ercot:<inr>` entity id and ordered
+    newest-first so the current call is the one returned.
+    """
+    rows = (
+        client.table(PREDICTIONS_TABLE)
+        .select(
+            "stage,confidence,margin,expected_rank,probabilities,rule_stage,"
+            "conformal_lo,conformal_hi,conformal_alpha,withdrawn,as_of,model_version"
+        )
+        .eq("entity_id", f"ercot:{inr}")
+        .order("as_of", desc=True)
+        .order("confidence", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        return None
+    pred = rows[0]
+
+    probs = pred.get("probabilities") or {}
+    # Rank every class high-to-low so the UI can show a probability breakdown.
+    ranked = sorted(
+        (
+            {
+                "stage": stage,
+                "label": PREDICTED_STAGE_LABELS.get(stage, stage),
+                "probability": prob,
+            }
+            for stage, prob in probs.items()
+        ),
+        key=lambda item: item["probability"] or 0,
+        reverse=True,
+    )
+    rule_stage = pred.get("rule_stage")
+    return {
+        "stage": pred.get("stage"),
+        "stage_label": PREDICTED_STAGE_LABELS.get(pred.get("stage"), pred.get("stage")),
+        "confidence": pred.get("confidence"),
+        "margin": pred.get("margin"),
+        "expected_rank": pred.get("expected_rank"),
+        "probabilities": ranked,
+        "rule_stage": rule_stage,
+        "agrees_with_rule": rule_stage is None or rule_stage == pred.get("stage"),
+        "conformal_range": [pred.get("conformal_lo"), pred.get("conformal_hi")],
+        "conformal_alpha": pred.get("conformal_alpha"),
+        "withdrawn": pred.get("withdrawn"),
+        "as_of": pred.get("as_of"),
+        "model_version": pred.get("model_version"),
+    }
 
 
 def _load_links(client: Client) -> list[dict]:
@@ -297,6 +373,41 @@ def _links_by_inr(links: list[dict]) -> dict[str, dict]:
 
 
 # --------------------------------------------------------------------------- #
+# Cached base load
+# --------------------------------------------------------------------------- #
+# The three DB loads below are filter-independent — every /map request needs the
+# same ercot rows, links, and linked-permit rows; filters are applied in Python
+# afterward. Cache the assembled base for a short TTL so back-to-back loads (and
+# different filter combos) don't re-scan Supabase each time. The data only
+# changes when a discovery run writes new snapshots, so a small TTL is safe.
+_BASE_TTL_SECONDS = 120
+_base_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
+
+def _load_map_base(
+    client: Client,
+) -> tuple[dict[str, dict], dict[str, dict], dict[str, list[dict]]]:
+    now = time.monotonic()
+    cached = _base_cache["value"]
+    if cached is not None and (now - _base_cache["at"]) < _BASE_TTL_SECONDS:
+        return cached
+
+    ercot = _load_ercot(client)
+    per_inr = _links_by_inr(_load_links(client))
+
+    # Coordinates need permit rows, but only for RNs that link to a project.
+    needed_rns: set[str] = set()
+    for inr, agg in per_inr.items():
+        if inr in ercot:
+            needed_rns |= agg["rns"]
+    permits_by_rn = _load_permits(client, needed_rns)
+
+    value = (ercot, per_inr, permits_by_rn)
+    _base_cache.update(at=now, value=value)
+    return value
+
+
+# --------------------------------------------------------------------------- #
 # Public entry points
 # --------------------------------------------------------------------------- #
 def build_map(
@@ -321,15 +432,7 @@ def build_map(
     to place the pin at exact FRS coordinates. The 300k+ events table is never
     touched here.
     """
-    ercot = _load_ercot(client)
-    per_inr = _links_by_inr(_load_links(client))
-
-    # Coordinates need permit rows, but only for RNs that link to a project.
-    needed_rns: set[str] = set()
-    for inr, agg in per_inr.items():
-        if inr in ercot:
-            needed_rns |= agg["rns"]
-    permits_by_rn = _load_permits(client, needed_rns)
+    ercot, per_inr, permits_by_rn = _load_map_base(client)
 
     features: list[dict[str, Any]] = []
     for inr, proj in ercot.items():
@@ -493,6 +596,7 @@ def build_project_detail(client: Client, inr: str) -> dict[str, Any] | None:
         "approved": approved,
     }
     best = agg["best"] or {}
+    prediction = _load_prediction(client, inr)
 
     return {
         "inr": inr,
@@ -510,6 +614,7 @@ def build_project_detail(client: Client, inr: str) -> dict[str, Any] | None:
         "gim_study_phase": proj.get("gim_study_phase"),
         "projected_cod": proj.get("projected_cod"),
         "stage": _stage_for(has_air_permit, has_regulatory, approved),
+        "stage_prediction": prediction,
         "days_in_queue": _days_in_queue(proj),
         "event_count": len(past),
         "latest_event": past[-1]["label"] if past else None,
