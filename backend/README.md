@@ -196,3 +196,109 @@ Each feature's `properties` carry `name`, `county`, `stage`, `precision`,
 `capacity_mw`/`fuel`/`technology` (when ERCOT-linked), `rn_number`/`permit_no`,
 `inr`, and `resolution_status`/`resolution_score`. The response `meta` block
 totals pins by precision and by stage.
+
+---
+
+# Derived layer — stage classifier
+
+**The question:** the queue tells you a project exists. It does not tell you how
+far along it is, or whether it is still moving. This layer answers both, per
+project, with an honest uncertainty attached.
+
+```
+ercot_projects (history)  ->  momentum      ->
+tceq_permits + resolved_links -> permits    ->  features -> model -> stage_predictions
+rule table                ->  weak labels   ->
+```
+
+No fetch step of its own — it reads what Sources #1 and #2 already persisted.
+
+### Where the labels come from
+
+There is no labelled training set for "what stage is this project in", so the
+labels are made by a deterministic rule table (`app/classify/stages.py`) reading
+milestone columns. That has a hard limit worth stating plainly:
+
+| Stage | Evidence | Available? |
+|---|---|---|
+| `concept` | in the queue, nothing else | yes |
+| `fel1` | screening study | yes, via `gim_study_phase` |
+| `fel2_prefeed` | full interconnection study | yes, via `gim_study_phase` |
+| `feed` | study approved | yes, via `gim_study_phase` |
+| `interconnection_agreement` | `ia_signed` | yes |
+| `fid` | financial security / notice to proceed | **only via a linked TCEQ permit** |
+| `construction` | construction milestone | **no source — never predicted** |
+| `cod` | energization / synchronization | yes |
+
+`construction` has no source at all, so it gets zero labels and can never be
+predicted. `GET /classify/labels` reports that under `missing_stages` rather
+than letting an absent class look like a rare one.
+
+The model is multinomial logistic regression — boring on purpose. The labels are
+weak, so their noise floor sits well above the gap between a linear model and a
+boosted one, and `coefficient x feature` is an explanation a non-technical reader
+can act on. Its agreement with the rules is reported as `rule_agreement` and is
+*not* accuracy: the rules made the labels, so agreement mostly measures overlap.
+
+### What it adds over the rules
+
+- **Calibrated probabilities.** Temperature scaling on a held-out split, so 0.7
+  means roughly seven in ten right. `ece` before and after is in `metrics`.
+- **A stage range, not just a guess.** Split conformal prediction returns a
+  contiguous interval — "between FEED and FID" — that covers the true stage at
+  least `1 - alpha` of the time.
+- **Momentum.** `cod_slip_rate` is the Theil-Sen slope of projected COD against
+  report date: ~0 holding schedule, ~1 slipping a month per month, negative
+  pulling in. Null below three snapshots, because "cannot tell yet" is not "not
+  moving". A project six months from COD for three running years is not an
+  early-stage opportunity, it is a stalled one, and only the series shows that.
+- **Coverage.** Every project gets an answer, including the ones no rule fires
+  on.
+
+### Setup
+
+Run `migrations/0004_stage_classifier.sql` in the Supabase SQL editor (needs
+`set_updated_at()` from `0001`). It creates `model_runs`, `stage_predictions`
+and `project_momentum`. No new credentials — it uses the same `SUPABASE_URL` +
+`SUPABASE_SERVICE_KEY` as everything else.
+
+### Run
+
+- `POST /classify` — label, fit, calibrate, score every project, persist.
+  `?persist=false` to see the summary without writing; `?as_of=YYYY-MM-DD` to
+  reconstruct what was knowable then; `?alpha=` for the conformal miscoverage
+  rate. Training and scoring happen in one pass, so no model file is written —
+  `model_version` is a content hash of the training inputs, so re-running on
+  unchanged data reproduces the same version instead of stacking model rows.
+- `GET /classify/labels` — weak-label coverage, read-only. Worth reading first.
+- `POST /classify/momentum` — recompute the series metrics on their own.
+- `GET /stages` — stored predictions. Filters: `stage`, `as_of`,
+  `model_version`, `min_confidence`, `limit`, `offset`.
+- `GET /momentum` — stored momentum. Filters: `grade`, `as_of`.
+- `GET /projects/{inr}/stage` — everything known about one project, including
+  whether the model and the rule disagree.
+
+```bash
+curl -X POST 'http://localhost:8000/classify?persist=false'   # dry run
+curl -X POST 'http://localhost:8000/classify'
+curl 'http://localhost:8000/stages?stage=interconnection_agreement&min_confidence=0.7'
+curl 'http://localhost:8000/momentum?grade=stalled'
+curl 'http://localhost:8000/projects/26INR0001/stage'
+```
+
+### Reading a prediction
+
+`confidence`, `margin` and `entropy` answer three different questions. A call at
+confidence 0.5 with margin 0.45 is decisive; 0.5 with margin 0.02 is a coin flip
+between two adjacent stages, and only `margin` tells them apart. `expected_rank`
+is the probability-weighted lifecycle position — it moves smoothly where the
+argmax stage jumps, so it is the better thing to plot. `withdrawn` is a boolean,
+never a stage: withdrawal is not a position on the lifecycle.
+
+### Tests
+
+```bash
+cd backend && uv run pytest -q
+```
+
+No database or network needed — the store layer is tested against a fake client.

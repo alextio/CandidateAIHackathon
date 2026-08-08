@@ -46,3 +46,6 @@ env/
 
 # uv
 uv.lock
+
+# Classifier scratch
+data/models/
