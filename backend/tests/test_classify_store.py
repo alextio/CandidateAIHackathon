@@ -208,3 +208,82 @@ def test_large_writes_are_batched():
     assert written == 1200
     assert len(batches) == 3
     assert sum(len(batch) for batch, _ in batches) == 1200
+
+
+# ---------------------------------------------------------------------------
+# The two sources date themselves differently
+#
+# `ercot_projects.report_date` is the month a queue snapshot describes.
+# `tceq_permits.snapshot_date` is the day this pipeline crawled the registry.
+# Filtering the second by the first matches nothing — the crawl is always newer
+# than any published report month — which silently emptied every permit feature
+# and made the FID stage unlabelable.
+# ---------------------------------------------------------------------------
+def _permit_filters(client) -> list[tuple]:
+    return client.tables["tceq_permits"].last_query.filters
+
+
+def _linked_client():
+    return FakeClient(
+        resolved_links=[{"inr": "26INR0001", "rn_number": "RN1", "permit_no": "P1", "score": 0.9}],
+        tceq_permits=[{"rn_number": "RN1", "permit_no": "P1", "snapshot_date": "2026-08-08"}],
+    )
+
+
+def test_permits_are_not_cut_off_by_a_crawl_date_when_scoring_the_present():
+    client = _linked_client()
+
+    linked = store.fetch_linked_permits(client)
+
+    assert set(linked) == {"26INR0001"}
+    assert not any(name == "lte" for name, *_ in _permit_filters(client))
+
+
+def test_an_explicit_backtest_still_pushes_the_crawl_cut_off_down():
+    client = _linked_client()
+
+    store.fetch_linked_permits(client, as_of=AS_OF)
+
+    assert ("lte", "snapshot_date", "2026-07-01") in _permit_filters(client)
+
+
+def test_default_run_does_not_filter_permits_by_the_ercot_report_month():
+    """The regression, at the level where it actually happened."""
+    from app.classify import service
+
+    client = FakeClient(
+        ercot_projects=[
+            {
+                "inr": "26INR0001",
+                "report_date": "2026-07-01",
+                "status": "active",
+                "gim_study_phase": "SS Completed, FIS Started, No IA",
+                "projected_cod": "2028-06-01",
+                "capacity_mw": 250.0,
+                "ia_signed": None,
+            }
+        ],
+        resolved_links=[
+            {"inr": "26INR0001", "rn_number": "RN1", "permit_no": "P1", "score": 0.9}
+        ],
+        tceq_permits=[
+            {
+                "rn_number": "RN1",
+                "permit_no": "P1",
+                # Crawled after the newest report month, as every crawl is.
+                "snapshot_date": "2026-08-08",
+                "entity_status": "active",
+                "affiliation_begin_date": "2025-03-01",
+                "affiliation_end_date": None,
+                "on_thesis": True,
+            }
+        ],
+    )
+
+    context = service.load_context(client)
+
+    assert context.as_of == AS_OF
+    assert context.permits["26INR0001"], "the permit was dropped by the crawl-date filter"
+    assert not any(name == "lte" for name, *_ in _permit_filters(client))
+    assert context.frame["n_permits"].to_list() == [1.0]
+    assert context.frame["has_active_permit"].to_list() == [True]

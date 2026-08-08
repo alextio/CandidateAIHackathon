@@ -52,9 +52,13 @@ from .confidence import (
 )
 from .features import design_frame, make_preprocessor
 from .labels import WeakLabel
-from .stages import MAX_CONFIDENCE, Stage
+from .stages import Stage
 
 ALGO = "multinomial_logistic_regression"
+
+# What OneHotEncoder(min_frequency=...) names the bucket it folds rare levels
+# into. Renamed on the way out; see `TrainedModel.feature_names`.
+INFREQUENT_SUFFIX = "_infrequent_sklearn"
 
 DEFAULT_ALPHA = 0.10
 DEFAULT_SEED = 20260808
@@ -87,7 +91,17 @@ class TrainedModel:
 
     @property
     def feature_names(self) -> list[str]:
-        return [str(name) for name in self.pipeline.named_steps["preprocess"].get_feature_names_out()]
+        """Design-matrix column names, in matrix order.
+
+        These reach the API verbatim inside `contributions`, so sklearn's
+        internal placeholder for the folded-together rare categories is renamed:
+        "momentum_grade_infrequent_sklearn" is a library implementation detail
+        leaking into a user-facing explanation.
+        """
+        return [
+            str(name).replace(INFREQUENT_SUFFIX, "_other")
+            for name in self.pipeline.named_steps["preprocess"].get_feature_names_out()
+        ]
 
     @property
     def coefficients(self) -> np.ndarray:
@@ -388,12 +402,17 @@ def predict_rows(
     """Prediction rows shaped for `stage_predictions`.
 
     `rule_labels` is optional and is stored beside the model's call rather than
-    replacing it, so the two can be compared later. Where a rule fired at the
-    rule table's own ceiling the rule wins and `label_source` records that — a
-    signed IA is a fact, not something to take a model's opinion on. The
-    threshold is `stages.MAX_CONFIDENCE` rather than a literal 1.0 because the
-    rule table never emits 1.0, and a literal here would be a branch that looks
-    meaningful and never runs.
+    replacing it, so the two can be compared later. Where the rule fired on a
+    date ERCOT actually reported the rule wins and `label_source` records that —
+    a signed IA is a fact, not something to take a model's opinion on.
+
+    That override used to key on `rule.confidence >= stages.MAX_CONFIDENCE`,
+    which is unreachable: `_confidence` only touches 0.99 when all eleven
+    `MILESTONE_FIELDS` are populated, and two of them (`construction_start`,
+    `construction_end`) have no source in any table. Every prediction came back
+    `label_source="model"`, including the several hundred sitting on a reported
+    IA or energization date. `WeakLabel.decisive` names the condition directly
+    instead of encoding it in a confidence threshold that cannot be met.
     """
     if frame.is_empty():
         return []
@@ -416,7 +435,7 @@ def predict_rows(
 
         stage = model.classes[predicted_index]
         label_source = "model"
-        if rule is not None and rule.confidence >= MAX_CONFIDENCE:
+        if rule is not None and rule.decisive:
             stage = rule.stage
             label_source = "rule"
 
@@ -430,12 +449,14 @@ def predict_rows(
                 "stage": stage.value,
                 "label_source": label_source,
                 "rule_stage": rule.stage.value if rule else None,
-                "probabilities": json.dumps(
-                    {
-                        member.value: float(row_probabilities[index])
-                        for index, member in enumerate(model.classes)
-                    }
-                ),
+                # Handed over as objects, not as JSON text. The columns are
+                # `jsonb`; a string here is stored as a JSON string scalar and
+                # every reader downstream has to parse the payload a second time
+                # to get at it.
+                "probabilities": {
+                    member.value: float(row_probabilities[index])
+                    for index, member in enumerate(model.classes)
+                },
                 "confidence": summary.confidence,
                 "margin": summary.margin,
                 "entropy": summary.entropy,
@@ -452,10 +473,8 @@ def predict_rows(
                 "conformal_hi": model.classes[interval[1]].value if interval else None,
                 "conformal_alpha": model.conformal.alpha if model.conformal else None,
                 "withdrawn": bool(rule.withdrawn) if rule else False,
-                "contributions": json.dumps(
-                    contributions(model, matrix[position], predicted_index)
-                ),
-                "justification": json.dumps(list(rule.justification) if rule else []),
+                "contributions": contributions(model, matrix[position], predicted_index),
+                "justification": list(rule.justification) if rule else [],
             }
         )
 
@@ -478,12 +497,16 @@ def to_model_run(model: TrainedModel, *, git_sha: str | None = None) -> dict[str
         "algo": ALGO,
         "n_train": model.n_train,
         "n_features": len(model.feature_names),
-        "feature_names": json.dumps(model.feature_names),
-        "classes": json.dumps([stage.value for stage in model.classes]),
+        # Objects, not JSON text — see the note in `predict_rows`. `metrics` in
+        # particular carries NaN whenever a metric is undefined; `store` strips
+        # those recursively, which `json.dumps` here would have hidden behind an
+        # unparseable `NaN` literal.
+        "feature_names": model.feature_names,
+        "classes": [stage.value for stage in model.classes],
         "temperature": model.temperature,
-        "metrics": json.dumps(model.metrics, default=float),
-        "coefficients": json.dumps(model.coefficients.tolist()),
-        "intercepts": json.dumps(model.intercepts.tolist()),
+        "metrics": model.metrics,
+        "coefficients": model.coefficients.tolist(),
+        "intercepts": model.intercepts.tolist(),
         "git_sha": git_sha,
         "notes": model.notes or None,
     }

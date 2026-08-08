@@ -90,14 +90,23 @@ def _iso(value: Any) -> Any:
 
 
 def _json_safe(value: Any) -> Any:
-    """NaN and infinity become null.
+    """NaN and infinity become null, at any depth.
 
     Momentum emits NaN for projects whose slope could not be estimated. JSON has
     no NaN literal, and PostgREST rejects the row rather than coercing it, so a
     single unestimable project would fail the whole batch.
+
+    Recursive because the `jsonb` columns carry real structure — `metrics` alone
+    holds `rank_mae` and `qwk`, both NaN whenever a test split turns out to hold
+    a single class. A top-level-only pass would leave those buried NaNs in place
+    and fail the model-run insert.
     """
     if isinstance(value, float) and not math.isfinite(value):
         return None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
     return _iso(value)
 
 
@@ -185,6 +194,15 @@ def fetch_linked_permits(
     a declared foreign key and `resolved_links` has none to `tceq_permits`.
     Only the newest snapshot of each permit is kept — older snapshots of one
     permit say nothing extra about whether that permit exists.
+
+    `as_of` here filters on `snapshot_date`, which is the date this pipeline
+    crawled TCEQ — not the date anything happened. Passing an ERCOT report month
+    is therefore almost always wrong and silently returns nothing: the crawl is
+    stamped today and every report month is in the past. Callers reconstructing
+    a past state should pass the crawl cut-off they mean; callers scoring the
+    present should pass `None` and rely on the row-level date guards in
+    `labels.permit_stage_evidence`, which compare the permit's own affiliation
+    dates against `as_of`. See `service.load_context`.
     """
     links = _paged(
         lambda: client.table(LINKS_TABLE)

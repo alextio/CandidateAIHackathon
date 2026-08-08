@@ -42,6 +42,8 @@ import numpy as np
 import polars as pl
 from scipy.stats import theilslopes
 
+from .phase import PHASE_LADDER, phase_rank_of
+
 # Below this, a slope is not estimated at all. Two points always fit a line
 # perfectly and tell you nothing about whether the trend is real.
 MIN_SNAPSHOTS_FOR_SLOPE = 3
@@ -64,31 +66,16 @@ TRACKED_FIELDS = ("status", "gim_study_phase", "projected_cod", "capacity_mw", "
 # ---------------------------------------------------------------------------
 # GIM study phase ordering
 #
-# UNVERIFIED AGAINST LIVE DATA. These are the phase names ERCOT's generation
-# interconnection process uses, matched case-insensitively as substrings so that
-# decorated values ("FIS - Approved", "Screening Study Complete") still land.
-#
-# Anything unmatched gets no rank rather than a guessed one — a wrong ordering
-# here would silently invert phase_velocity for the affected projects.
+# The parsing lives in `phase.py`, which documents what the live column really
+# contains. An earlier version matched patterns as substrings against the whole
+# string; because every live value contains "FIS", that returned the same rank
+# for all 1,238 projects and made `phase_velocity` identically zero.
 # ---------------------------------------------------------------------------
-PHASE_RANKS: tuple[tuple[str, int], ...] = (
-    ("screening study", 1),
-    ("ss", 1),
-    ("full interconnection study", 2),
-    ("fis", 2),
-    ("security", 3),
-    ("interconnection agreement", 4),
-    ("ia", 4),
-    ("energization", 5),
-    ("synchronization", 5),
-)
+PHASE_RANKS: tuple[tuple[str, int], ...] = PHASE_LADDER
 
 
 def phase_rank(value: object) -> float:
     """Ordinal position of a GIM study phase, or NaN when unrecognised.
-
-    Longest pattern first, so "full interconnection study" is not captured by
-    the bare "ss" or "ia" abbreviations sitting inside other words.
 
     Kept as a scalar function alongside the polars expression below: the two
     must agree, and `test_phase_rank_expression_matches_the_scalar` checks it.
@@ -96,33 +83,29 @@ def phase_rank(value: object) -> float:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return np.nan
 
-    text = str(value).strip().lower()
-    if not text:
-        return np.nan
-
-    for pattern, rank in sorted(PHASE_RANKS, key=lambda item: -len(item[0])):
-        if pattern in text:
-            return float(rank)
-    return np.nan
+    rank = phase_rank_of(str(value))
+    return np.nan if rank is None else rank
 
 
 def phase_rank_expr(column: str = "gim_study_phase") -> pl.Expr:
     """The same mapping as a polars expression.
 
-    Built shortest-pattern-first so the longest pattern ends up as the outermost
-    `when` and therefore wins. Reversing the order would let the bare "ss" and
-    "ia" abbreviations swallow the longer phase names that contain them.
-    """
-    text = pl.col(column).cast(pl.String).str.to_lowercase().str.strip_chars()
+    Delegates to the scalar rather than re-expressing the segment parser as a
+    chain of `when`/`then`: the two would then be two implementations of one
+    rule, free to drift, and the drift would be invisible — a wrong rank does
+    not raise, it just inverts `phase_velocity` for the projects it touches.
 
-    expr = pl.lit(None, dtype=pl.Float64)
-    for pattern, rank in sorted(PHASE_RANKS, key=lambda item: len(item[0])):
-        expr = (
-            pl.when(text.str.contains(pattern, literal=True))
-            .then(pl.lit(float(rank), dtype=pl.Float64))
-            .otherwise(expr)
+    The per-element call is cheap because `phase.parse_phase` is memoised and
+    the column holds six distinct values across the entire queue.
+    """
+    return (
+        pl.col(column)
+        .cast(pl.String)
+        .map_elements(
+            lambda value: phase_rank_of(value) if value is not None else None,
+            return_dtype=pl.Float64,
         )
-    return expr
+    )
 
 
 def grade_slope(slope: float | None, low: float | None, high: float | None) -> str:

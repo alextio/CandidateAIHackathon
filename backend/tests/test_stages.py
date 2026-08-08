@@ -17,7 +17,7 @@ from app.classify.labels import (
     permit_stage_evidence,
     weak_label,
 )
-from app.classify.stages import Stage, infer_stage
+from app.classify.stages import MAX_CONFIDENCE, Stage, infer_stage
 
 AS_OF = date(2026, 7, 1)
 
@@ -187,3 +187,53 @@ def test_label_quality_names_the_classes_that_can_never_be_predicted():
     assert Stage.CONSTRUCTION.value in quality.missing_stages
     assert Stage.INTERCONNECTION_AGREEMENT.value not in quality.missing_stages
     assert "NO LABELS for" in quality.report()
+
+
+# ---------------------------------------------------------------------------
+# Decisive labels
+#
+# The rule override in `train.predict_rows` used to key on
+# `confidence >= MAX_CONFIDENCE`, a threshold `_confidence` cannot reach because
+# two of the eleven MILESTONE_FIELDS have no source. These pin the replacement.
+# ---------------------------------------------------------------------------
+def test_no_weak_label_can_reach_the_old_max_confidence_threshold():
+    """Why the override had to stop keying on confidence."""
+    row = snapshot(
+        gim_study_phase="SS Completed, FIS Completed, IA",
+        ia_signed="2025-01-15",
+        projected_cod="2028-06-01",
+        approved_for_energization="2026-01-01",
+        approved_for_synchronization="2026-02-01",
+    )
+
+    assert weak_label(row, entity_id="ercot:26INR0001", as_of=AS_OF).confidence < MAX_CONFIDENCE
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"ia_signed": "2025-01-15"}, True),
+        ({"approved_for_energization": "2026-01-01"}, True),
+        ({"approved_for_synchronization": "2026-01-01"}, True),
+        # Parsed out of free text, not reported as a date.
+        ({"gim_study_phase": "SS Completed, FIS Completed, IA"}, False),
+        ({"gim_study_phase": "SS Completed, FIS Completed, No IA"}, False),
+        ({}, False),
+    ],
+)
+def test_only_reported_dates_make_a_label_decisive(overrides, expected):
+    label = weak_label(snapshot(**overrides), entity_id="ercot:26INR0001", as_of=AS_OF)
+
+    assert label.decisive is expected
+
+
+def test_a_decisive_label_still_has_to_be_usable_to_train_on():
+    """Withdrawal beats decisiveness — a cancelled project is not at COD."""
+    label = weak_label(
+        snapshot(approved_for_energization="2026-01-01", status="cancelled"),
+        entity_id="ercot:26INR0001",
+        as_of=AS_OF,
+    )
+
+    assert label.decisive is True
+    assert label.usable is False

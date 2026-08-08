@@ -62,7 +62,22 @@ def load_context(client: Client, as_of: date | None = None) -> Context:
         raise NoDataError(f"no ercot_projects snapshots at or before {resolved}")
 
     latest = store.latest_by_inr(history)
-    permits = store.fetch_linked_permits(client, as_of=resolved)
+
+    # The two sources date themselves differently, and conflating the two dates
+    # was silently discarding every permit. ERCOT rows carry `report_date`, the
+    # month the queue snapshot describes. TCEQ rows carry `snapshot_date`, the
+    # day this pipeline crawled the registry — always today or later than any
+    # published report month. Filtering permits by an ERCOT report month
+    # therefore matched nothing: the FID stage became unlabelable and
+    # `n_permits`, `permit_score`, `has_active_permit` and `has_thesis_permit`
+    # were zero for every project.
+    #
+    # A default run scores the present, so it takes the newest crawl. Leakage is
+    # still guarded, but at the row level and against the dates that mean
+    # something — `permit_stage_evidence` refuses any permit whose affiliation
+    # began after `as_of`. An explicit `as_of` is a backtest, and there the
+    # crawl cut-off is meaningful, so it is passed through.
+    permits = store.fetch_linked_permits(client, as_of=as_of)
 
     momentum = compute_momentum(snapshots_frame(history), resolved)
     frame = build_feature_frame(latest, momentum, as_of=resolved, linked_permits=permits)

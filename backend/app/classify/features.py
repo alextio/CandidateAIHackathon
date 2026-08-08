@@ -21,10 +21,11 @@ visible rather than being quietly claimed as accuracy.
 The preprocessing is a stock scikit-learn `ColumnTransformer`. An earlier draft
 hand-rolled the imputation, scaling and vocabularies so a model could be rebuilt
 from the database alone with no pickle. That bought reproducibility-from-SQL and
-cost about 150 lines of re-implemented sklearn, so it was dropped: the fitted
-pipeline is persisted with joblib instead, and the coefficients and feature
-names still go to `model_runs` so the dashboard can explain a prediction without
-loading anything.
+cost about 150 lines of re-implemented sklearn, so it was dropped. Nothing is
+pickled in its place either: training and scoring happen in one request (see
+`train.py`), so the fitted pipeline never has to outlive it, and the
+coefficients and feature names go to `model_runs` so a dashboard can still
+explain a prediction without loading anything.
 
 Everything in this module is pure. Nothing here touches a database.
 """

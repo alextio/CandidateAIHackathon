@@ -13,6 +13,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from app.classify import store
 from app.classify.features import (
     build_feature_frame,
     design_frame,
@@ -231,9 +232,11 @@ def test_probabilities_sum_to_one_and_match_the_reported_confidence(prepared):
 
     assert np.allclose(probabilities.sum(axis=1), 1.0)
     assert rows[0]["confidence"] == pytest.approx(float(probabilities[0].max()))
-    assert json.loads(rows[0]["probabilities"]).keys() == {
-        stage.value for stage in model.classes
-    }
+    # Objects, not JSON text: the columns are jsonb, and a pre-serialised string
+    # would land as a JSON string scalar that every reader has to parse again.
+    assert rows[0]["probabilities"].keys() == {stage.value for stage in model.classes}
+    assert isinstance(rows[0]["contributions"], list)
+    assert isinstance(rows[0]["justification"], list)
 
 
 def test_training_is_idempotent_on_identical_inputs(prepared):
@@ -250,9 +253,20 @@ def test_model_run_row_is_json_serialisable_and_matches_the_coefficients(prepare
     run = to_model_run(model, git_sha="abc1234")
 
     assert run["n_features"] == len(model.feature_names)
-    assert len(json.loads(run["feature_names"])) == run["n_features"]
-    assert np.array(json.loads(run["coefficients"])).shape == model.coefficients.shape
-    assert json.loads(run["classes"]) == [stage.value for stage in model.classes]
+    assert len(run["feature_names"]) == run["n_features"]
+    assert np.array(run["coefficients"]).shape == model.coefficients.shape
+    assert run["classes"] == [stage.value for stage in model.classes]
+    # The jsonb payloads have to survive the trip as JSON. `store` strips the
+    # NaNs that `metrics` carries whenever a metric is undefined.
+    assert json.dumps(store._json_safe(run), allow_nan=False)
+
+
+def test_no_sklearn_placeholder_reaches_the_feature_names(prepared):
+    """"..._infrequent_sklearn" is a library detail, not an explanation."""
+    frame, labels = prepared
+    model = train(frame, labels)
+
+    assert not any(name.endswith("_infrequent_sklearn") for name in model.feature_names)
 
 
 def test_too_few_labels_fits_without_calibration_rather_than_raising():
