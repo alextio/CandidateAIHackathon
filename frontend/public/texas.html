@@ -553,13 +553,17 @@
         ? `<span class="d-pred-warn">Rule says ${esc(pred.rule_stage)}</span>`
         : (pred.withdrawn ? `<span class="d-pred-warn">Flagged withdrawn</span>` : `<span>Model prediction</span>`);
       const asOf = pred.as_of ? `<span>as of ${fmtDate(pred.as_of)}</span>` : `<span></span>`;
+      // Entropy is normalized 0..1 — how spread out the class probabilities are.
+      // Low = a peaked, decisive distribution; high = uncertain across stages.
+      const entropy = pred.entropy != null
+        ? `<span>uncertainty ${Math.round(Number(pred.entropy) * 100)}%</span>` : "";
       return `<div class="d-sec-title">Predicted stage <span>${esc(pred.model_version || "model")}</span></div>` +
         `<div class="d-pred">
           <div class="d-pred-head">
             <span class="d-pred-stage">${esc(pred.stage_label || pred.stage)}</span>
             <span class="d-pred-conf">${conf} <small>confidence</small></span>
           </div>
-          <div class="d-pred-sub">${note}${asOf}</div>
+          <div class="d-pred-sub">${note}${entropy}${asOf}</div>
           <div class="d-probs">${bars}</div>
         </div>`;
     }

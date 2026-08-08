@@ -147,7 +147,7 @@ def _load_prediction(client: Client, inr: str) -> dict | None:
     rows = (
         client.table(PREDICTIONS_TABLE)
         .select(
-            "stage,confidence,margin,expected_rank,probabilities,rule_stage,"
+            "stage,confidence,margin,entropy,expected_rank,probabilities,rule_stage,"
             "conformal_lo,conformal_hi,conformal_alpha,withdrawn,as_of,model_version"
         )
         .eq("entity_id", f"ercot:{inr}")
@@ -182,6 +182,7 @@ def _load_prediction(client: Client, inr: str) -> dict | None:
         "stage_label": PREDICTED_STAGE_LABELS.get(pred.get("stage"), pred.get("stage")),
         "confidence": pred.get("confidence"),
         "margin": pred.get("margin"),
+        "entropy": pred.get("entropy"),
         "expected_rank": pred.get("expected_rank"),
         "probabilities": ranked,
         "rule_stage": rule_stage,
