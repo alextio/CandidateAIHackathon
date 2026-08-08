@@ -209,7 +209,14 @@
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script>
-    const API_BASE = new URLSearchParams(location.search).get("api") || "http://localhost:8000";
+    // Default to the same-origin, Vite-proxied path (see vite.config.ts
+    // '/api/texas-backend') rather than a hardcoded http://localhost:8000.
+    // In Codespaces/tunneled dev, the browser runs on a different machine
+    // than the container, so "localhost:8000" in the page resolves to the
+    // client's own machine and fails — going through the forwarded Vite
+    // origin avoids that. Override with ?api=<url> to hit a backend directly
+    // (e.g. when serving this file outside Vite).
+    const API_BASE = new URLSearchParams(location.search).get("api") || "/api/texas-backend";
 
     const STAGE = {
       queued:      { color: "#8b98a9", label: "Queued" },

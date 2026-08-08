@@ -1668,6 +1668,23 @@ export default defineConfig(({ mode }) => {
             });
           },
         },
+        // Texas projects backend (backend/, standalone FastAPI + Supabase) —
+        // proxied so browsers behind Codespaces/tunnel port-forwarding (where
+        // "localhost:8000" resolves to the client's own machine, not this
+        // container) can still reach it through the single forwarded Vite
+        // port. The vite dev server process itself always has real loopback
+        // access to :8000. See frontend/src/services/texas-projects.ts and
+        // frontend/public/texas.html.
+        '/api/texas-backend': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/texas-backend/, ''),
+          configure: (proxy) => {
+            proxy.on('error', (err) => {
+              console.log('Texas backend proxy error:', err.message);
+            });
+          },
+        },
       },
     },
   };
