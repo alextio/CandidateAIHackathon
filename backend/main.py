@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.db import TABLE, get_client
@@ -19,6 +20,14 @@ from app.tceq.central_registry import REGION_DATASETS
 from app.tceq.db import EVENTS_TABLE
 
 app = FastAPI(title="Texas Project Discovery", version="0.2.0")
+
+# Allow the frontend (any origin) to call the API from the browser.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
