@@ -195,12 +195,31 @@ def _load_prediction(client: Client, inr: str) -> dict | None:
     }
 
 
-def _load_links(client: Client) -> list[dict]:
-    return _paginate(
-        lambda: client.table(LINKS_TABLE)
-        .select("source,rn_number,permit_no,inr,status,score,method,tceq_name,ercot_name")
-        .order("rn_number")
-    )
+def _load_links(client: Client, inrs: set[str] | None = None) -> list[dict]:
+    """resolved_links rows, optionally scoped to a set of ERCOT project ids.
+
+    `resolved_links` is huge (100k+ rows) but the map only ever consumes links
+    whose `inr` is one of the ~1.3k projects in the view. Passing `inrs` filters
+    the read to those, turning a full-table scan (~170 pages) into a handful of
+    `.in_(...)` chunks. `inrs=None` keeps the original full scan for callers that
+    need every link.
+    """
+    cols = "source,rn_number,permit_no,inr,status,score,method,tceq_name,ercot_name"
+    if inrs is None:
+        return _paginate(
+            lambda: client.table(LINKS_TABLE).select(cols).order("rn_number")
+        )
+    if not inrs:
+        return []
+    out: list[dict] = []
+    for chunk in _chunks(sorted(inrs)):
+        out += _paginate(
+            lambda ch=chunk: client.table(LINKS_TABLE)
+            .select(cols)
+            .in_("inr", ch)
+            .order("rn_number")
+        )
+    return out
 
 
 def _load_permits(client: Client, rns: set[str]) -> dict[str, list[dict]]:
@@ -394,7 +413,9 @@ def _load_map_base(
         return cached
 
     ercot = _load_ercot(client)
-    per_inr = _links_by_inr(_load_links(client))
+    # Only links for projects the map actually renders — resolved_links is 100k+
+    # rows, but `ercot` is ~1.3k. Scoping the read here avoids a full-table scan.
+    per_inr = _links_by_inr(_load_links(client, inrs=set(ercot.keys())))
 
     # Coordinates need permit rows, but only for RNs that link to a project.
     needed_rns: set[str] = set()

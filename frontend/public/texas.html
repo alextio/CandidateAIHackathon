@@ -315,6 +315,12 @@
       approved:   { color: "#35d0a5", label: "Approved" },
     };
     const SRC = { ercot: "ERCOT", tceq: "TCEQ", puct: "PUCT" };
+    // Classifier's 8-class lifecycle, earliest -> latest. Orders the probability
+    // vector in the dossier so it reads as a distribution over ordered stages.
+    const PRED_STAGE_ORDER = [
+      "concept", "fel1", "fel2_prefeed", "feed",
+      "interconnection_agreement", "fid", "construction", "cod",
+    ];
 
     const map = new maplibregl.Map({
       container: "map",
@@ -540,10 +546,14 @@
       if (!pred || !pred.stage) return "";
       const conf = pred.confidence != null
         ? `${Math.round(Number(pred.confidence) * 100)}<small>%</small>` : "—";
-      const probs = (pred.probabilities || []).slice(0, 5);
-      const bars = probs.map((p, i) => {
+      // Full probability vector, one bar per class. Ordered along the lifecycle
+      // (earliest -> latest) so it reads as a distribution over ordered stages
+      // rather than a leaderboard; the argmax stage is highlighted.
+      const probs = (pred.probabilities || []).slice()
+        .sort((a, b) => (PRED_STAGE_ORDER.indexOf(a.stage)) - (PRED_STAGE_ORDER.indexOf(b.stage)));
+      const bars = probs.map((p) => {
         const pct = Math.round(Number(p.probability || 0) * 100);
-        return `<div class="d-prob ${i === 0 ? "top" : ""}">
+        return `<div class="d-prob ${p.stage === pred.stage ? "top" : ""}">
           <span class="pl">${esc(p.label || p.stage)}</span>
           <span class="d-prob-bar"><i style="width:${pct}%"></i></span>
           <span class="pv">${pct}%</span>
