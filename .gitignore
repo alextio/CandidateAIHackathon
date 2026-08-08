@@ -1,0 +1,20 @@
+# Monorepo-wide safety net. Subprojects (e.g. frontend/) carry their own,
+# more specific .gitignore files which git honors independently of this one.
+
+**/node_modules/
+**/dist/
+**/build/
+**/.DS_Store
+*.log
+
+# Env files and local secrets
+**/.env
+**/.env.local
+**/.env*.bak*
+**/.env*-bak*
+**/.env*.backup*
+**/.env*-backup*
+
+.vercel
+.wrangler
+tmp/
