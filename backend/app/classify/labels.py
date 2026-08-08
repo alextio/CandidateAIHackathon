@@ -30,6 +30,11 @@ built without one. `permit_stage_evidence` uses permits linked through
 `resolved_links` to label the FID stage. `construction` still gets nothing, and
 `label_quality` says so out loud rather than letting a silently absent class
 look like a rare one.
+
+The three phase-derived rows in that table are only as good as the parse. See
+`phase.py` for what `gim_study_phase` actually holds — a comma-separated triple
+whose third segment is usually the negation "No IA" — and for why a substring
+scan over the whole value read every project as the same stage.
 """
 from __future__ import annotations
 
@@ -38,27 +43,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
+from .phase import phase_milestones
 from .stages import MILESTONE_FIELDS, Stage, StageInference, infer_stage
 
 # Below this a weak label is too thin to train on. The rule table's own floor is
 # 0.35 (fired on nothing but a queue appearance); 0.45 keeps labels that had at
 # least some corroborating milestone evidence.
 MIN_LABEL_CONFIDENCE = 0.45
-
-# gim_study_phase text -> the milestone field it stands in for. Matched as
-# case-insensitive substrings, longest first, because the live values are
-# decorated ("FIS - Approved", "Screening Study Complete").
-#
-# UNVERIFIED AGAINST LIVE DATA — the same caveat as momentum.PHASE_RANKS.
-PHASE_MILESTONES: tuple[tuple[str, str], ...] = (
-    ("full interconnection study approved", "fis_approved"),
-    ("full interconnection study", "fis_requested"),
-    ("screening study complete", "screening_study_complete"),
-    ("screening study", "screening_study_started"),
-    ("fis approved", "fis_approved"),
-    ("fis complete", "fis_approved"),
-    ("fis", "fis_requested"),
-)
 
 # Direct column -> milestone field, where only the names differ.
 COLUMN_MILESTONES: tuple[tuple[str, str], ...] = (
@@ -69,6 +60,15 @@ COLUMN_MILESTONES: tuple[tuple[str, str], ...] = (
 )
 
 ACTIVE_PERMIT_STATUSES = {"active", "a", "issued"}
+
+# Stages that ERCOT reports as a date in a typed column rather than leaving to
+# be inferred from `gim_study_phase` text or from a linked permit. A rule firing
+# on one of these is repeating a reported fact, and the model is not entitled to
+# overrule it — see `WeakLabel.decisive` and `train.predict_rows`.
+DECISIVE_COLUMNS: dict[Stage, tuple[str, ...]] = {
+    Stage.COD: ("approved_for_energization", "approved_for_synchronization"),
+    Stage.INTERCONNECTION_AGREEMENT: ("ia_signed",),
+}
 
 
 def _text(value: Any) -> str:
@@ -93,7 +93,13 @@ def _as_date(value: Any) -> date | None:
 
 
 def milestones_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
-    """Map one `ercot_projects` row onto the milestone dict the rules expect."""
+    """Map one `ercot_projects` row onto the milestone dict the rules expect.
+
+    Typed columns win over the phase string where both speak: a dated
+    `ia_signed` is a reported fact, and "IA" in the phase text is a summary of
+    it. Everything the phase adds — the screening and study states, which have
+    no columns of their own — is folded in underneath.
+    """
     milestones: dict[str, str] = {}
 
     for column, milestone in COLUMN_MILESTONES:
@@ -101,12 +107,8 @@ def milestones_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
         if value:
             milestones[milestone] = value
 
-    phase = _text(snapshot.get("gim_study_phase")).lower()
-    if phase:
-        for pattern, milestone in PHASE_MILESTONES:
-            if pattern in phase:
-                milestones.setdefault(milestone, _text(snapshot.get("gim_study_phase")))
-                break
+    for milestone, evidence in phase_milestones(snapshot.get("gim_study_phase")).items():
+        milestones.setdefault(milestone, evidence)
 
     return milestones
 
@@ -153,6 +155,18 @@ def permit_stage_evidence(permits: list[dict[str, Any]], as_of: date) -> str | N
     return None
 
 
+def is_decisive(snapshot: dict[str, Any], stage: Stage) -> bool:
+    """Whether this stage rests on a date ERCOT reported, not on inference.
+
+    Only two stages can: a signed IA and an energization or synchronization
+    approval are dated columns. Everything else in the rule table is read out of
+    `gim_study_phase` free text or borrowed from a linked TCEQ permit, and those
+    are inferences a model is allowed to disagree with.
+    """
+    columns = DECISIVE_COLUMNS.get(stage, ())
+    return any(_as_date(snapshot.get(column)) is not None for column in columns)
+
+
 @dataclass
 class WeakLabel:
     """One training example produced by the rules rather than by a human."""
@@ -164,6 +178,7 @@ class WeakLabel:
     confidence: float
     rule: str
     withdrawn: bool = False
+    decisive: bool = False
     justification: list[str] = field(default_factory=list)
 
     @property
@@ -212,6 +227,7 @@ def weak_label(
         confidence=inference.confidence,
         rule=rule,
         withdrawn=is_withdrawn(snapshot),
+        decisive=is_decisive(snapshot, inference.stage),
         justification=list(inference.justification),
     )
 
@@ -297,10 +313,12 @@ def label_quality(labels: list[WeakLabel]) -> LabelQuality:
 
 
 __all__ = [
+    "DECISIVE_COLUMNS",
     "MILESTONE_FIELDS",
     "MIN_LABEL_CONFIDENCE",
     "LabelQuality",
     "WeakLabel",
+    "is_decisive",
     "is_withdrawn",
     "label_quality",
     "milestones_from_snapshot",
