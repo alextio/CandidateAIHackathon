@@ -18,12 +18,14 @@ from app.config import get_settings
 from app.db import TABLE, get_client
 from app.discovery import discover
 from app.ercot.codes import DATA_CENTER_TECHNOLOGIES
-from app.map_view import build_map
+from app.map_view import build_map, build_project_detail
+from app.puct import codes as puct_codes
+from app.puct import discovery as puct_discovery
 from app.tceq import discovery as tceq_discovery
 from app.tceq.central_registry import REGION_DATASETS
 from app.tceq.db import EVENTS_TABLE
 
-app = FastAPI(title="Texas Project Discovery", version="0.2.0")
+app = FastAPI(title="Texas Project Discovery", version="0.3.0")
 
 # Allow the frontend (any origin) to call the API from the browser.
 app.add_middleware(
@@ -42,6 +44,7 @@ def read_root():
         "sources": {
             "ercot": "ERCOT GIS Report (PG7-200-ER, report type 15933)",
             "tceq": "TCEQ Central Registry air NSR permits (data.texas.gov / Socrata)",
+            "puct": "PUCT Interchange docket filings (regulatory milestones + entity match)",
         },
         "supabase_configured": settings.supabase_configured,
     }
@@ -149,6 +152,61 @@ def discover_tceq(
     return body
 
 
+@app.post("/discover/puct")
+def discover_puct(
+    dockets: list[str] | None = Query(
+        None,
+        description="Docket control numbers to pull; omit for the curated seed set: "
+        + ", ".join(puct_codes.SEED_CONTROL_NUMBERS),
+    ),
+    entity_match: bool = Query(
+        True,
+        description="Resolve filing parties to ercot_projects/tceq_permits (requires Supabase)",
+    ),
+    persist: bool = Query(True, description="Upsert results into Supabase"),
+    resolve: bool = Query(
+        True, description="Run entity resolution (requires Supabase); see entity_match"
+    ),
+    include_records: bool = Query(
+        False, description="Return the full filing + event + link lists in the response"
+    ),
+):
+    """Fetch PUCT docket filings, derive milestone events, resolve entities, and (optionally) persist."""
+    settings = get_settings()
+    try:
+        result, records, events, links = puct_discovery.discover(
+            settings,
+            dockets=dockets,
+            entity_match=entity_match,
+            persist=persist,
+            resolve=resolve,
+        )
+    except Exception as exc:  # surface fetch/parse/db errors clearly
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    body = asdict(result)
+    if not settings.supabase_configured and (persist or resolve):
+        body["note"] = "Supabase not configured; scraped only. Set SUPABASE_* to persist/resolve."
+    if include_records:
+        body["filings"] = [r.model_dump(mode="json") for r in records]
+        body["events"] = [e.model_dump(mode="json") for e in events]
+        body["links"] = [
+            {
+                "control_number": link.control_number,
+                "party": link.party,
+                "status": link.status,
+                "score": link.score,
+                "method": link.method,
+                "matched_source": link.matched_source,
+                "inr": link.inr,
+                "tceq_rn": link.tceq_rn,
+                "matched_name": link.matched_name,
+            }
+            for link in links
+        ]
+    return body
+
+
 @app.get("/events")
 def list_events(
     entity: str | None = Query(None, description="Substring match on the entity/company name"),
@@ -190,26 +248,27 @@ def list_events(
 
 @app.get("/map")
 def map_projects(
-    source: str = Query("all", description="all | tceq | ercot"),
     stage: str | None = Query(
-        None, description="queued | permitting | permit_only"
+        None, description="queued | permitting | regulatory | approved"
     ),
-    resolved_only: bool = Query(
-        False, description="Only permits confidently linked to an ERCOT project"
-    ),
-    on_thesis: bool | None = Query(
-        None, description="Filter TCEQ pins to electric-power-generation NAICS"
-    ),
+    status: str | None = Query(None, description="active | inactive | cancelled"),
     county: str | None = Query(None, description="County name filter"),
     min_mw: float | None = Query(None, description="Minimum ERCOT capacity (MW)"),
+    has_permit: bool | None = Query(
+        None, description="Only projects with (or without) a linked TCEQ air permit"
+    ),
+    on_thesis: bool | None = Query(
+        None, description="Only projects with a power-generation (on-thesis) permit"
+    ),
     limit: int = Query(5000, le=20000),
 ):
-    """GeoJSON pin layer for the Texas map.
+    """GeoJSON pin layer for the Texas map — one pin per ERCOT project.
 
-    One de-duplicated feature per project: TCEQ permit sites (exact FRS
-    coordinates where available, else county centroid) plus ERCOT queue projects
-    with no permit yet (county centroids). Each feature's `stage` and `precision`
-    encode how far along the project is.
+    Every feature is a single ERCOT interconnection project (keyed by `inr`),
+    placed at exact FRS coordinates when a linked TCEQ permit supplies them and
+    at the county centroid otherwise. Each carries a precomputed funnel `stage`,
+    milestone/insight fields, a merged multi-source `timeline_json`, and the
+    linked TCEQ `permits_json` — everything the click panel renders.
     """
     settings = get_settings()
     if not settings.supabase_configured:
@@ -217,22 +276,44 @@ def map_projects(
             status_code=400,
             detail="Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_KEY.",
         )
-    if source not in ("all", "tceq", "ercot"):
-        raise HTTPException(status_code=400, detail="source must be all | tceq | ercot")
     client = get_client(settings)
     try:
         return build_map(
             client,
-            source=source,
             stage=stage,
-            resolved_only=resolved_only,
-            on_thesis=on_thesis,
+            status=status,
             county=county,
             min_mw=min_mw,
+            has_permit=has_permit,
+            on_thesis=on_thesis,
             limit=limit,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/map/{inr}")
+def map_project_detail(inr: str):
+    """Full dossier for one ERCOT project — fetched on pin click.
+
+    Returns the merged multi-source `timeline`, linked TCEQ `permits`, the
+    `milestones` checklist, and headline ERCOT fields. Every query is scoped to
+    this `inr`, so it stays cheap regardless of table size.
+    """
+    settings = get_settings()
+    if not settings.supabase_configured:
+        raise HTTPException(
+            status_code=400,
+            detail="Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_KEY.",
+        )
+    client = get_client(settings)
+    try:
+        detail = build_project_detail(client, inr)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"Unknown project: {inr}")
+    return detail
 
 
 @app.get("/projects")

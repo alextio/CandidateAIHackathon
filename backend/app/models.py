@@ -62,7 +62,17 @@ EntityStatus = Literal["active", "inactive", "unknown"]
 # affiliation-level, not application-transaction level, so we cannot cleanly
 # split "application filed" from "permit issued"; these are the dated signals
 # the feed actually exposes.
-EventType = Literal["registered", "status_change", "affiliation_ended"]
+TceqEventType = Literal["registered", "status_change", "affiliation_ended"]
+
+# Source #3 (PUCT) is transaction-level: each docket filing is dated, so we can
+# surface true regulatory milestones. These are derived from the filing index
+# (item type + description), not from PDF contents (v1 is metadata-only).
+PuctEventType = Literal[
+    "docket_opened", "application_filed", "order_issued", "agreement_approved", "filing"
+]
+
+# project_events is source-agnostic; its event_type may come from any pipeline.
+EventType = TceqEventType | PuctEventType
 
 
 class PermitRecord(BaseModel):
@@ -125,4 +135,38 @@ class ProjectEvent(BaseModel):
     county: str | None = None
     state: str = "TX"
 
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Source #3: PUCT Interchange docket filings ---
+
+
+class FilingRecord(BaseModel):
+    """One filing on a PUCT Interchange docket (a single row of the filing list).
+
+    PUCT organizes everything by Control Number (the docket/case id). Each filing
+    carries an item number, a filed date, the filing party, an item-type code, and
+    a free-text description. Typed columns cover what we query/resolve on; `raw`
+    keeps every scraped cell so nothing from the source row is lost. v1 is
+    metadata-only — we index the filing list and never open the PDFs.
+    """
+
+    control_number: str  # docket/case id, e.g. 58481 (natural key part)
+    item_number: str  # filing sequence within the docket (natural key part)
+
+    utility_type: str | None = None  # Interchange UtilityType facet (e.g. 'A')
+    filed_date: date | None = None
+    filing_party: str | None = None  # who filed (company / agency / person)
+    item_type: str | None = None  # PUCT item-type code, e.g. COM, PRJ, ORD, APP
+    item_type_label: str | None = None  # human label for the code
+    filing_description: str | None = None
+
+    docket_title: str | None = None  # the docket's case style, when available
+    source_url: str | None = None  # per-item document listing on Interchange
+    state: str = "TX"  # PUCT's jurisdiction is Texas-only
+
+    # provenance
+    snapshot_date: date | None = None  # the run date this snapshot was pulled
+
+    # every scraped cell, name -> value (JSON-serializable)
     raw: dict[str, Any] = Field(default_factory=dict)

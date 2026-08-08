@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
+from postgrest.exceptions import APIError
 from supabase import Client
 
 from ..db import get_client  # re-exported for symmetry with the ercot module
@@ -105,12 +106,32 @@ def _upsert(client: Client, table: str, rows: list[dict], on_conflict: str, batc
     written = 0
     for start in range(0, len(rows), batch_size):
         chunk = rows[start : start + batch_size]
-        client.table(table).upsert(chunk, on_conflict=on_conflict).execute()
+        _upsert_chunk(client, table, chunk, on_conflict)
         written += len(chunk)
     return written
 
 
-def upsert_permits(client: Client, records: list[PermitRecord], *, batch_size: int = 500) -> int:
+def _upsert_chunk(
+    client: Client, table: str, chunk: list[dict], on_conflict: str, *, depth: int = 0
+) -> None:
+    """Upsert one chunk; on a Postgres statement timeout, split and retry.
+
+    Large JSONB rows across many indexes can exceed Supabase's per-statement
+    timeout (code 57014). Rather than fail the whole run, halve the batch and
+    retry until it fits (down to a single row).
+    """
+    try:
+        client.table(table).upsert(chunk, on_conflict=on_conflict).execute()
+    except APIError as exc:
+        timed_out = getattr(exc, "code", None) == "57014" or "57014" in str(exc)
+        if not timed_out or len(chunk) <= 1 or depth > 6:
+            raise
+        mid = len(chunk) // 2
+        _upsert_chunk(client, table, chunk[:mid], on_conflict, depth=depth + 1)
+        _upsert_chunk(client, table, chunk[mid:], on_conflict, depth=depth + 1)
+
+
+def upsert_permits(client: Client, records: list[PermitRecord], *, batch_size: int = 250) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     # The feed can repeat a (rn_number, permit_no) within one snapshot; collapse
     # to the composite PK so a single upsert batch has no duplicate key values.
@@ -122,13 +143,13 @@ def upsert_permits(client: Client, records: list[PermitRecord], *, batch_size: i
     return _upsert(client, PERMITS_TABLE, rows, "rn_number,permit_no,snapshot_date", batch_size)
 
 
-def upsert_events(client: Client, events: list[ProjectEvent], *, batch_size: int = 500) -> int:
+def upsert_events(client: Client, events: list[ProjectEvent], *, batch_size: int = 250) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     rows = [_event_row(e, now_iso) for e in events]
     return _upsert(client, EVENTS_TABLE, rows, "source,permit_no,event_type,event_date", batch_size)
 
 
-def upsert_links(client: Client, links: list[LinkResult], *, batch_size: int = 500) -> int:
+def upsert_links(client: Client, links: list[LinkResult], *, batch_size: int = 250) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     rows = [_link_row(link, now_iso) for link in links]
     return _upsert(client, LINKS_TABLE, rows, "source,rn_number,permit_no", batch_size)

@@ -18,7 +18,9 @@ cd backend
 uvicorn main:app --reload           # serves on http://localhost:8000
 ```
 
-Response is a GeoJSON `FeatureCollection` — one `Point` feature per project:
+Response is a GeoJSON `FeatureCollection` — **one `Point` feature per ERCOT
+project** (keyed by `inr`). TCEQ permits and PUCT filings are folded into each
+project, not shown as separate pins:
 
 ```jsonc
 {
@@ -28,27 +30,55 @@ Response is a GeoJSON `FeatureCollection` — one `Point` feature per project:
       "type": "Feature",
       "geometry": { "type": "Point", "coordinates": [-95.37, 29.76] }, // [lng, lat]
       "properties": {
-        "layer": "tceq",              // tceq | ercot
-        "stage": "permitting",        // queued | permitting | permit_only
-        "id": "tceq:RN123:PSD-TX-1",
-        "name": "Acme Power LLC",
+        // ── ERCOT core (pin identity + styling) ──
+        "inr": "24INR0123",
+        "name": "Acme Power LLC",       // interconnecting entity (falls back to project_name)
+        "project_name": "Brazos Solar 1",
         "county": "HARRIS",
         "state": "TX",
-        "precision": "exact",         // exact (FRS coords) | county (centroid)
+        "zone": "COAST",
+        "status": "active",             // active | inactive | cancelled
         "capacity_mw": 250.0,
-        "fuel": "GAS",
-        "technology": "CC",
-        "on_thesis": true,
-        "resolution_status": "resolved"
+        "fuel": "Gas",
+        "technology": "Combined Cycle",
+        "gim_study_phase": "SS",
+        "projected_cod": "2027-06-01",
+        "stage": "regulatory",          // queued | permitting | regulatory | approved
+        "precision": "exact",           // exact (FRS coords) | county (centroid)
+
+        // ── precomputed insights (style / rank without re-deriving) ──
+        "has_air_permit": true,
+        "has_regulatory": true,
+        "permit_count": 2,
+        "event_count": 5,
+        "milestones_hit": 3,            // out of milestones_total
+        "milestones_total": 5,
+        "latest_event": "PUCT order issued",
+        "latest_event_date": "2026-05-14",
+        "days_in_queue": 612,
+        "match_confidence": 0.94,       // best resolved_links score
+        "match_status": "resolved",
+
+        // ── detail payloads (JSON strings — JSON.parse on click) ──
+        "milestones_json": "{\"in_queue\":true,\"air_permit\":true,...}",
+        "timeline_json": "[{\"date\":\"2024-11-01\",\"source\":\"ercot\",\"type\":\"queue_seen\",\"label\":\"Seen in ERCOT queue\"}, ...]",
+        "permits_json": "[{\"rn_number\":\"RN123\",\"permit_no\":\"PSD-TX-1\",\"site_name\":\"...\",\"on_thesis\":true,\"precision\":\"exact\"}, ...]"
       }
     }
   ],
   "meta": {
-    "counts": { "total": 812, "exact": 540, "county": 272 },
-    "by_stage": { "queued": 400, "permitting": 300, "permit_only": 112 }
+    "counts": {
+      "total": 812, "exact": 540, "county": 272,
+      "with_permit": 410, "with_regulatory": 96, "capacity_mw": 148230
+    },
+    "by_stage": { "queued": 400, "permitting": 320, "regulatory": 72, "approved": 20 }
   }
 }
 ```
+
+> **Nested payloads are JSON strings.** `timeline_json`, `permits_json`, and
+> `milestones_json` are stringified so they survive MapLibre's property
+> serialization intact. `JSON.parse` them inside your click handler.
 
 > **Coordinate order:** GeoJSON is `[longitude, latitude]`. MapLibre, Mapbox,
 > and `L.geoJSON` all expect this order natively — don't swap it.
@@ -57,17 +87,17 @@ Response is a GeoJSON `FeatureCollection` — one `Point` feature per project:
 
 ## 2. Query params (all optional)
 
-| Param           | Values / type              | What it does                                        |
-| --------------- | -------------------------- | --------------------------------------------------- |
-| `source`        | `all` \| `tceq` \| `ercot` | Which layer(s) to include. Default `all`.           |
-| `stage`         | `queued` \| `permitting` \| `permit_only` | Filter by funnel stage.              |
-| `resolved_only` | `true` \| `false`          | Only permits confidently linked to an ERCOT project.|
-| `on_thesis`     | `true` \| `false`          | Only electric-power-generation NAICS permits.       |
-| `county`        | string, e.g. `HARRIS`      | County filter.                                       |
-| `min_mw`        | number                     | Minimum ERCOT capacity in MW.                       |
-| `limit`         | number (≤ 20000)           | Cap features returned. Default 5000.                |
+| Param        | Values / type              | What it does                                             |
+| ------------ | -------------------------- | -------------------------------------------------------- |
+| `stage`      | `queued` \| `permitting` \| `regulatory` \| `approved` | Furthest stage reached.      |
+| `status`     | `active` \| `inactive` \| `cancelled` | ERCOT lifecycle status.                       |
+| `has_permit` | `true` \| `false`          | Only projects with (or without) a linked TCEQ air permit.|
+| `on_thesis`  | `true` \| `false`          | Only projects with a power-generation (on-thesis) permit.|
+| `county`     | string, e.g. `HARRIS`      | County filter.                                           |
+| `min_mw`     | number                     | Minimum ERCOT capacity in MW.                            |
+| `limit`      | number (≤ 20000)           | Cap features returned. Default 5000.                     |
 
-Example: `GET /map?source=tceq&on_thesis=true&min_mw=100`
+Example: `GET /map?stage=regulatory&on_thesis=true&min_mw=100`
 
 ---
 
@@ -85,7 +115,7 @@ const map = new maplibregl.Map({
 });
 
 map.on("load", async () => {
-  const res = await fetch("http://localhost:8000/map?source=all");
+  const res = await fetch("http://localhost:8000/map");
   const geojson = await res.json();
 
   map.addSource("projects", { type: "geojson", data: geojson });
@@ -98,9 +128,10 @@ map.on("load", async () => {
       // color by stage
       "circle-color": [
         "match", ["get", "stage"],
-        "queued",      "#94a3b8",
-        "permitting",  "#f59e0b",
-        "permit_only", "#3b82f6",
+        "queued",      "#8b98a9",
+        "permitting",  "#ffb020",
+        "regulatory",  "#4c9bff",
+        "approved",    "#35d0a5",
         "#64748b",
       ],
       // bigger dot = confirmed exact location
@@ -141,10 +172,15 @@ L.geoJSON(geojson, {
 
 ## 4. What the fields mean (for styling)
 
-- **`stage`** — how far along the project is. Use it for pin color.
-  - `queued` — in the ERCOT interconnection queue, no permit yet.
-  - `permitting` — has a TCEQ air permit *and* links to a queue project.
-  - `permit_only` — has a TCEQ air permit, no ERCOT match.
+- **`stage`** — the furthest maturity the project has reached. Use it for pin
+  color (it's a sequential ramp).
+  - `queued` — in the ERCOT interconnection queue, no air permit linked.
+  - `permitting` — has a linked TCEQ air permit (environmental review underway).
+  - `regulatory` — has linked PUCT docket activity (public-utility review).
+  - `approved` — ERCOT approved it for energization/synchronization.
+- **`timeline_json` / `permits_json` / `milestones_json`** — `JSON.parse` these
+  in your click handler to render a project dossier (merged multi-source event
+  timeline, linked TCEQ permits, milestone checklist).
 - **`precision`** — `exact` means real FRS coordinates; `county` means it's
   placed on the county centroid (many pins may stack on the same point).
   Use it to size/fade pins or to warn users a location is approximate.

@@ -73,13 +73,20 @@ class LinkResult:
     raw: dict = field(default_factory=dict)
 
 
-def build_ercot_index(rows: list[dict]) -> list[ErcotEntity]:
-    """Build a resolvable index from ercot_projects rows.
+# ERCOT candidates indexed by normalized county name (None for county-less rows).
+ErcotIndex = dict[str | None, list[ErcotEntity]]
+
+
+def build_ercot_index(rows: list[dict]) -> ErcotIndex:
+    """Build a county-blocked index from ercot_projects rows.
 
     Each project contributes candidate names from both interconnecting_entity
-    and project_name so we can match on either side.
+    and project_name (so we can match on either side), bucketed by county. This
+    lets resolution compare a permit only against ERCOT projects in the same
+    county — since county is a gate, a cross-county pair could never resolve
+    anyway — turning an O(permits × all-projects) scan into a per-county one.
     """
-    index: list[ErcotEntity] = []
+    index: ErcotIndex = {}
     for row in rows:
         inr = row.get("inr")
         if not inr:
@@ -89,26 +96,32 @@ def build_ercot_index(rows: list[dict]) -> list[ErcotEntity]:
         for raw_name in (row.get("interconnecting_entity"), row.get("project_name")):
             norm = normalize_name(raw_name)
             if norm:
-                index.append(
+                index.setdefault(county_norm, []).append(
                     ErcotEntity(inr=inr, name=raw_name, normalized=norm, county=county_norm)
                 )
     return index
 
 
-def resolve_record(record: PermitRecord, index: list[ErcotEntity]) -> LinkResult:
-    """Find the best ERCOT match for one TCEQ permit record."""
+def resolve_record(record: PermitRecord, index: ErcotIndex) -> LinkResult:
+    """Find the best ERCOT match for one TCEQ permit record (county-blocked)."""
     tceq_county = record.county.strip().upper() if record.county else None
     # Compare against both the company and the site name; keep the stronger.
     tceq_names = [n for n in (record.company_name, record.entity_name) if n]
     tceq_norms = [(normalize_name(n), n) for n in tceq_names]
     tceq_norms = [(norm, orig) for norm, orig in tceq_norms if norm]
 
+    # Only ERCOT projects in the permit's county are viable candidates. County-less
+    # ERCOT rows (rare) are always considered but can only reach `review`.
+    candidates = list(index.get(None, []))
+    if tceq_county:
+        candidates += index.get(tceq_county, [])
+
     best_score = 0.0
     best: ErcotEntity | None = None
     best_tceq_name = tceq_names[0] if tceq_names else ""
     county_matched = False
 
-    for cand in index:
+    for cand in candidates:
         for norm, orig in tceq_norms:
             sim = name_similarity(norm, cand.normalized)
             if sim == 0.0:

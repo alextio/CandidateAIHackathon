@@ -18,9 +18,10 @@
       --faint: #4a5765;
       --accent: #2ad4ee;          /* electric cyan — chrome only */
       --accent-dim: rgba(42, 212, 238, 0.14);
-      --queued: #8b98a9;          /* muted slate */
-      --permitting: #ffb020;      /* amber */
-      --permit-only: #4c9bff;     /* blue */
+      --queued: #8b98a9;          /* muted slate — ERCOT queue only */
+      --permitting: #ffb020;      /* amber — TCEQ air permit */
+      --regulatory: #4c9bff;      /* blue — PUCT docket activity */
+      --approved: #35d0a5;        /* green — approved to energize */
       --display: "Space Grotesk", system-ui, sans-serif;
       --mono: "IBM Plex Mono", ui-monospace, monospace;
     }
@@ -117,7 +118,8 @@
     .key-row .swatch { width: 11px; height: 11px; border-radius: 50%; flex: 0 0 auto; }
     .key-row.q .swatch { background: var(--queued); box-shadow: 0 0 8px 1px var(--queued); }
     .key-row.p .swatch { background: var(--permitting); box-shadow: 0 0 9px 1px var(--permitting); }
-    .key-row.o .swatch { background: var(--permit-only); box-shadow: 0 0 9px 1px var(--permit-only); }
+    .key-row.r .swatch { background: var(--regulatory); box-shadow: 0 0 9px 1px var(--regulatory); }
+    .key-row.a .swatch { background: var(--approved); box-shadow: 0 0 9px 1px var(--approved); }
     .key-note { font-size: 10.5px; color: var(--faint); margin-top: 11px; line-height: 1.5; }
 
     #err {
@@ -141,6 +143,67 @@
     }
     .pop-meta { color: var(--muted); margin-top: 8px; font-size: 11.5px; line-height: 1.5; }
     .pop-approx { color: var(--permitting); font-size: 10.5px; margin-top: 8px; }
+
+    /* ── Detail drawer (project dossier on click) ─────────────────── */
+    #detail {
+      position: absolute; top: 18px; right: 18px; z-index: 12;
+      width: 340px; max-height: calc(100% - 36px); overflow: auto;
+      background: var(--panel); backdrop-filter: blur(14px) saturate(1.2);
+      border: 1px solid var(--border); border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255,255,255,0.04);
+      padding: 16px 18px 20px; transform: translateX(calc(100% + 26px));
+      transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    #detail.open { transform: translateX(0); }
+    #detail .dclose {
+      position: absolute; top: 12px; right: 13px; background: none; border: 0;
+      color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; padding: 2px 6px;
+    }
+    #detail .dclose:hover { color: var(--ink); }
+    .d-stage {
+      display: inline-block; font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase;
+      padding: 3px 9px; border-radius: 999px; font-weight: 600;
+    }
+    .d-op { font-family: var(--display); font-weight: 700; font-size: 18px; letter-spacing: -0.01em; margin: 11px 0 2px; padding-right: 22px; line-height: 1.15; }
+    .d-sub { color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .d-sub .inr { color: var(--accent); }
+
+    /* progress rail */
+    .d-progress { margin: 15px 0 4px; }
+    .d-track { display: flex; gap: 4px; }
+    .d-seg { flex: 1; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.08); }
+    .d-seg.on { background: var(--accent); box-shadow: 0 0 7px 0 var(--accent-dim); }
+    .d-progress .lab { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin-top: 8px; }
+
+    /* stat grid */
+    .d-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 9px; overflow: hidden; margin: 15px 0; }
+    .d-cell { background: rgba(9,13,18,0.6); padding: 9px 11px; }
+    .d-cell .k { font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--muted); }
+    .d-cell .v { font-family: var(--display); font-size: 15px; font-weight: 600; margin-top: 3px; color: var(--ink); font-variant-numeric: tabular-nums; }
+    .d-cell .v small { font-size: 10px; color: var(--muted); font-weight: 400; }
+
+    .d-sec-title { font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); margin: 18px 0 10px; display: flex; justify-content: space-between; }
+
+    /* timeline */
+    .tl { position: relative; margin-left: 6px; padding-left: 16px; border-left: 1px solid var(--border); }
+    .tl-item { position: relative; padding: 0 0 13px; }
+    .tl-item:last-child { padding-bottom: 2px; }
+    .tl-dot { position: absolute; left: -21px; top: 3px; width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--bg); }
+    .tl-item.future .tl-dot { background: transparent !important; border-color: var(--faint); }
+    .tl-date { font-size: 10px; color: var(--faint); font-variant-numeric: tabular-nums; }
+    .tl-label { font-size: 12px; color: var(--ink); margin-top: 1px; line-height: 1.35; }
+    .tl-src { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+    .tl-item.future .tl-label { color: var(--muted); }
+
+    /* permit cards */
+    .permit { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; margin-bottom: 8px; background: rgba(255,255,255,0.02); }
+    .permit .pname { font-size: 12px; color: var(--ink); font-weight: 500; }
+    .permit .pmeta { font-size: 10.5px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+    .permit .ptag { display: inline-block; font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; padding: 2px 6px; border-radius: 5px; margin-top: 6px; }
+    .ptag.thesis { color: var(--approved); background: rgba(53,208,165,0.12); }
+    .ptag.exact { color: var(--accent); background: var(--accent-dim); }
+    .d-empty { font-size: 11px; color: var(--faint); font-style: italic; }
+    @media (max-width: 560px) { #detail { width: calc(100% - 24px); right: 12px; top: auto; bottom: 12px; max-height: 62%; } }
 
     /* MapLibre chrome tuned for dark */
     .maplibregl-ctrl-group { background: var(--panel) !important; border: 1px solid var(--border) !important; }
@@ -171,20 +234,22 @@
     <hr class="rule" />
 
     <div class="field">
-      <span>Source</span>
-      <select id="source">
-        <option value="all">All sources</option>
-        <option value="tceq">TCEQ permits</option>
-        <option value="ercot">ERCOT queue</option>
-      </select>
-    </div>
-    <div class="field">
-      <span>Stage</span>
+      <span>Stage — furthest reached</span>
       <select id="stage">
         <option value="">Any stage</option>
         <option value="queued">Queued</option>
         <option value="permitting">Permitting</option>
-        <option value="permit_only">Permit only</option>
+        <option value="regulatory">Regulatory</option>
+        <option value="approved">Approved</option>
+      </select>
+    </div>
+    <div class="field">
+      <span>Status</span>
+      <select id="status">
+        <option value="">Any status</option>
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+        <option value="cancelled">Cancelled</option>
       </select>
     </div>
     <div class="field">
@@ -192,20 +257,27 @@
       <input type="number" id="min_mw" min="0" step="10" placeholder="any" />
     </div>
     <label class="check">
+      <input type="checkbox" id="has_permit" /> Has TCEQ air permit
+    </label>
+    <label class="check">
       <input type="checkbox" id="on_thesis" /> Power generation only
     </label>
     <button id="apply">Apply filters</button>
 
     <hr class="rule" />
 
-    <div class="key-title">Signal key</div>
-    <div class="key-row q"><span class="swatch"></span> Queued — ERCOT only</div>
-    <div class="key-row p"><span class="swatch"></span> Permitting</div>
-    <div class="key-row o"><span class="swatch"></span> Permit only</div>
-    <div class="key-note">Node size scales with capacity. Dimmed nodes are placed on the county centroid (approximate).</div>
+    <div class="key-title">Maturity — furthest stage reached</div>
+    <div class="key-row q"><span class="swatch"></span> Queued — ERCOT queue only</div>
+    <div class="key-row p"><span class="swatch"></span> Permitting — TCEQ air permit</div>
+    <div class="key-row r"><span class="swatch"></span> Regulatory — PUCT docket</div>
+    <div class="key-row a"><span class="swatch"></span> Approved — cleared to energize</div>
+    <div class="key-row" style="color:var(--accent)"><span class="swatch" style="background:transparent;border:1.4px solid var(--accent);box-shadow:0 0 8px 0 var(--accent)"></span> Cluster — click / zoom to open</div>
+    <div class="key-note">One pin per ERCOT project. Node size scales with capacity; dimmed nodes sit on the county centroid (approximate). Click a pin for its full dossier.</div>
 
     <div id="err"></div>
   </section>
+
+  <aside id="detail"><button class="dclose" aria-label="Close">×</button><div id="detail-body"></div></aside>
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script>
@@ -219,10 +291,12 @@
     const API_BASE = new URLSearchParams(location.search).get("api") || "/api/texas-backend";
 
     const STAGE = {
-      queued:      { color: "#8b98a9", label: "Queued" },
-      permitting:  { color: "#ffb020", label: "Permitting" },
-      permit_only: { color: "#4c9bff", label: "Permit only" },
+      queued:     { color: "#8b98a9", label: "Queued" },
+      permitting: { color: "#ffb020", label: "Permitting" },
+      regulatory: { color: "#4c9bff", label: "Regulatory" },
+      approved:   { color: "#35d0a5", label: "Approved" },
     };
+    const SRC = { ercot: "ERCOT", tceq: "TCEQ", puct: "PUCT" };
 
     const map = new maplibregl.Map({
       container: "map",
@@ -237,11 +311,13 @@
 
     function buildUrl() {
       const p = new URLSearchParams();
-      p.set("source", document.getElementById("source").value);
       const stage = document.getElementById("stage").value;
       if (stage) p.set("stage", stage);
+      const status = document.getElementById("status").value;
+      if (status) p.set("status", status);
       const minMw = document.getElementById("min_mw").value;
       if (minMw) p.set("min_mw", minMw);
+      if (document.getElementById("has_permit").checked) p.set("has_permit", "true");
       if (document.getElementById("on_thesis").checked) p.set("on_thesis", "true");
       return `${API_BASE}/map?${p.toString()}`;
     }
@@ -262,8 +338,9 @@
         const total = document.getElementById("count-total");
         total.textContent = fmt(c.total);
         total.classList.toggle("loading", !c.total);
+        const gw = c.capacity_mw ? (c.capacity_mw / 1000).toFixed(1) + " GW" : "—";
         document.getElementById("count-split").innerHTML =
-          `<b>${fmt(c.exact)}</b> exact · <b>${fmt(c.county)}</b> approximate`;
+          `<b>${gw}</b> queued · <b>${fmt(c.with_permit)}</b> permitted · <b>${fmt(c.with_regulatory)}</b> at PUCT`;
 
         if (gj.features?.length) {
           const b = new maplibregl.LngLatBounds();
@@ -277,38 +354,85 @@
     }
 
     map.on("load", () => {
-      map.addSource("projects", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      map.addSource("projects", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+        cluster: true,
+        clusterRadius: 46,
+        clusterMaxZoom: 11,
+      });
 
       const stageColor = [
         "match", ["get", "stage"],
         "queued", STAGE.queued.color,
         "permitting", STAGE.permitting.color,
-        "permit_only", STAGE.permit_only.color,
+        "regulatory", STAGE.regulatory.color,
+        "approved", STAGE.approved.color,
         "#64748b",
       ];
-      // Node size scales with capacity; projects with no MW get a small base node.
+      // Individual node size scales with capacity; no-MW projects get a base node.
       const sizeByCapacity = [
         "interpolate", ["linear"], ["coalesce", ["get", "capacity_mw"], 0],
-        0, 4, 100, 6.5, 500, 10, 1500, 15,
+        0, 4.5, 100, 7, 500, 11, 1500, 16,
       ];
-      const approxDim = ["case", ["==", ["get", "precision"], "county"], 0.55, 1];
+      const approxDim = ["case", ["==", ["get", "precision"], "county"], 0.6, 1];
 
-      // Glow halo (energized grid node) beneath the solid node.
+      // ── Clusters: soft glow ring + translucent core + count ──────────
       map.addLayer({
-        id: "project-glow",
+        id: "cluster-glow",
         type: "circle",
         source: "projects",
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": "#2ad4ee",
+          "circle-blur": 1,
+          "circle-opacity": 0.18,
+          "circle-radius": ["step", ["get", "point_count"], 22, 25, 30, 100, 40, 400, 54],
+        },
+      });
+      map.addLayer({
+        id: "clusters",
+        type: "circle",
+        source: "projects",
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": "rgba(42, 212, 238, 0.16)",
+          "circle-stroke-color": "#2ad4ee",
+          "circle-stroke-width": 1.4,
+          "circle-radius": ["step", ["get", "point_count"], 15, 25, 21, 100, 29, 400, 40],
+        },
+      });
+      map.addLayer({
+        id: "cluster-count",
+        type: "symbol",
+        source: "projects",
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": ["get", "point_count_abbreviated"],
+          "text-font": ["Open Sans Bold"],
+          "text-size": ["step", ["get", "point_count"], 12, 100, 14, 400, 17],
+        },
+        paint: { "text-color": "#eafcff", "text-halo-color": "rgba(6,9,13,0.6)", "text-halo-width": 1 },
+      });
+
+      // ── Individual projects (spread out at zoom): glow + node ─────────
+      map.addLayer({
+        id: "point-glow",
+        type: "circle",
+        source: "projects",
+        filter: ["!", ["has", "point_count"]],
         paint: {
           "circle-color": stageColor,
-          "circle-radius": ["*", sizeByCapacity, 2.4],
-          "circle-blur": 1,
-          "circle-opacity": ["*", 0.35, approxDim],
+          "circle-radius": ["*", sizeByCapacity, 2],
+          "circle-blur": 0.9,
+          "circle-opacity": ["*", 0.3, approxDim],
         },
       });
       map.addLayer({
         id: "project-pins",
         type: "circle",
         source: "projects",
+        filter: ["!", ["has", "point_count"]],
         paint: {
           "circle-color": stageColor,
           "circle-radius": sizeByCapacity,
@@ -318,29 +442,122 @@
         },
       });
 
-      map.on("click", "project-pins", (e) => {
-        const p = e.features[0].properties;
-        const s = STAGE[p.stage] || { color: "#64748b", label: p.stage };
-        const mw = p.capacity_mw != null && p.capacity_mw !== "" ? `${fmt(Number(p.capacity_mw))} MW` : "capacity n/a";
-        const bits = [mw, p.fuel, p.technology].filter(Boolean).join(" · ");
-        const approx = p.precision === "county" ? `<div class="pop-approx">△ approximate — county centroid</div>` : "";
-        new maplibregl.Popup({ closeButton: true, offset: 12 })
-          .setLngLat(e.lngLat)
-          .setHTML(
-            `<strong>${p.name || "Unknown operator"}</strong>` +
-            `<div><span class="pop-stage" style="background:${s.color}22;color:${s.color}">${s.label}</span></div>` +
-            `<div class="pop-meta">${p.county || "?"} County, TX<br>${bits}</div>` +
-            approx
-          )
-          .addTo(map);
+      // Click a cluster → zoom in until it splits.
+      map.on("click", "clusters", (e) => {
+        const f = map.queryRenderedFeatures(e.point, { layers: ["clusters"] })[0];
+        const id = f.properties.cluster_id;
+        map.getSource("projects").getClusterExpansionZoom(id).then((zoom) => {
+          map.easeTo({ center: f.geometry.coordinates, zoom: Math.min(zoom, 12), duration: 600 });
+        });
       });
-      map.on("mouseenter", "project-pins", () => (map.getCanvas().style.cursor = "pointer"));
-      map.on("mouseleave", "project-pins", () => (map.getCanvas().style.cursor = ""));
+
+      map.on("click", "project-pins", (e) => openDetail(e.features[0].properties));
+
+      for (const layer of ["clusters", "project-pins"]) {
+        map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
+        map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
+      }
 
       load();
     });
 
     document.getElementById("apply").addEventListener("click", load);
+
+    // ── Project dossier drawer ────────────────────────────────────────────
+    const drawer = document.getElementById("detail");
+    const drawerBody = document.getElementById("detail-body");
+    const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    const fmtDate = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString("en-US",
+      { year: "numeric", month: "short", day: "numeric" }) : "—";
+    const cell = (k, v) => `<div class="d-cell"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+
+    function closeDetail() { drawer.classList.remove("open"); detailReq++; }
+    drawer.querySelector(".dclose").addEventListener("click", closeDetail);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
+
+    // The pin layer is light. On click we show the header instantly from the
+    // pin's own props, then lazy-fetch the full dossier for just that project.
+    let detailReq = 0;
+
+    function openDetail(p) {
+      const s = STAGE[p.stage] || { color: "#64748b", label: p.stage };
+      const hit = Number(p.milestones_hit || 0), total = Number(p.milestones_total || 5);
+      const segs = Array.from({ length: total }, (_, i) =>
+        `<div class="d-seg ${i < hit ? "on" : ""}"></div>`).join("");
+      const statusTag = p.status && p.status !== "active"
+        ? ` · <span style="color:var(--permitting)">${esc(p.status)}</span>` : "";
+
+      drawerBody.innerHTML =
+        `<span class="d-stage" style="background:${s.color}22;color:${s.color}">${s.label}</span>` +
+        `<div class="d-op">${esc(p.name || "Unknown operator")}</div>` +
+        `<div class="d-sub">${esc(p.project_name || "")}${p.project_name ? "<br>" : ""}` +
+          `<span class="inr">${esc(p.inr || "")}</span>${statusTag} · ${esc(p.county || "?")} County, TX</div>` +
+        `<div class="d-progress"><div class="d-track">${segs}</div>` +
+          `<div class="lab">${hit} of ${total} milestones reached</div></div>` +
+        `<div id="d-rest"><div class="d-empty">Loading dossier…</div></div>`;
+      drawer.classList.add("open");
+      loadDetail(p.inr, s);
+    }
+
+    async function loadDetail(inr, s) {
+      const req = ++detailReq;
+      try {
+        const res = await fetch(`${API_BASE}/map/${encodeURIComponent(inr)}`);
+        if (!res.ok) throw new Error(`${res.status}`);
+        const d = await res.json();
+        if (req !== detailReq) return;          // superseded by a newer click
+        renderDossier(d, s);
+      } catch (e) {
+        if (req !== detailReq) return;
+        const rest = document.getElementById("d-rest");
+        if (rest) rest.innerHTML = `<div class="d-empty">Couldn't load details (${esc(e.message)}).</div>`;
+      }
+    }
+
+    function renderDossier(d, s) {
+      const conf = d.match_confidence != null
+        ? `${Math.round(Number(d.match_confidence) * 100)}<small>%</small>` : "—";
+      const grid =
+        cell("Capacity", d.capacity_mw != null ? `${fmt(Number(d.capacity_mw))} <small>MW</small>` : "—") +
+        cell("Days in queue", d.days_in_queue != null ? `${fmt(Number(d.days_in_queue))} <small>days</small>` : "—") +
+        cell("Fuel", esc(d.fuel || "—")) +
+        cell("Technology", esc(d.technology || "—")) +
+        cell("Zone", esc(d.zone || "—")) +
+        cell("Study phase", esc(d.gim_study_phase || "—")) +
+        cell("Projected COD", d.projected_cod ? fmtDate(d.projected_cod) : "—") +
+        cell("Link confidence", conf);
+
+      const timeline = d.timeline || [];
+      const tl = timeline.length ? `<div class="tl">` + timeline.map((t) => {
+        const col = { ercot: s.color, tceq: "#ffb020", puct: "#4c9bff" }[t.source] || "#8b98a9";
+        return `<div class="tl-item ${t.future ? "future" : ""}">
+          <span class="tl-dot" style="background:${col}"></span>
+          <div class="tl-date">${fmtDate(t.date)}${t.future ? " · projected" : ""}</div>
+          <div class="tl-label">${esc(t.label)}</div>
+          <div class="tl-src">${SRC[t.source] || t.source}${t.entity ? " · " + esc(t.entity) : ""}</div>
+        </div>`;
+      }).join("") + `</div>` : `<div class="d-empty">No dated milestones yet.</div>`;
+
+      const permits = d.permits || [];
+      const perms = permits.length ? permits.map((pm) => `
+        <div class="permit">
+          <div class="pname">${esc(pm.site_name || pm.company || pm.permit_no || "Permit")}</div>
+          <div class="pmeta">
+            ${pm.permit_no ? "Permit " + esc(pm.permit_no) + " · " : ""}${esc(pm.rn_number || "")}<br>
+            ${esc(pm.naics_label || "NAICS n/a")}${pm.county ? " · " + esc(pm.county) + " Co." : ""}
+          </div>
+          ${pm.on_thesis ? `<span class="ptag thesis">Power generation</span> ` : ""}
+          ${pm.precision === "exact" ? `<span class="ptag exact">Exact coords${pm.geo_accuracy_m ? " ±" + esc(pm.geo_accuracy_m) + "m" : ""}</span>` : ""}
+        </div>`).join("") : `<div class="d-empty">No TCEQ air permit linked to this project.</div>`;
+
+      document.getElementById("d-rest").innerHTML =
+        `<div class="d-grid">${grid}</div>` +
+        `<div class="d-sec-title">Timeline <span>${timeline.filter((t) => !t.future).length} events</span></div>` +
+        tl +
+        `<div class="d-sec-title">TCEQ air permits <span>${permits.length}</span></div>` +
+        perms;
+    }
   </script>
 </body>
 </html>
