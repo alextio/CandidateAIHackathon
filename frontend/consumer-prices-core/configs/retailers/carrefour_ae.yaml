@@ -1,0 +1,25 @@
+retailer:
+  slug: carrefour_ae
+  name: Carrefour UAE
+  marketCode: ae
+  currencyCode: AED
+  adapter: search
+  baseUrl: https://www.carrefouruae.com
+  enabled: true
+
+  searchConfig:
+    numResults: 5
+    # Pinned product URLs historically used the bare hostname while the
+    # configured base URL uses `www`; both are the same storefront.
+    allowedHosts:
+      - carrefouruae.com
+
+  rateLimit:
+    requestsPerMinute: 20
+    maxConcurrency: 2
+    delayBetweenRequestsMs: 3000
+
+  discovery:
+    mode: search
+    maxPages: 20
+    seeds: []
