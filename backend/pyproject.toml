@@ -10,4 +10,20 @@ dependencies = [
     "openpyxl>=3.1.5",
     "pydantic-settings>=2.15.0",
     "supabase>=2.31.0",
+    # --- Stage classifier (app/classify) ---
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "polars>=1.30",
+    # scipy earns two separate keeps: theilslopes (Theil-Sen slope WITH a
+    # confidence interval, so no hand-rolled bootstrap) and optimize
+    # (temperature scaling).
+    "scipy>=1.13",
+    "scikit-learn>=1.5",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -2,14 +2,18 @@
 
 Source #1 — ERCOT: Public MIS GIS Report (interconnection queue) -> projects.
 Source #2 — TCEQ: Central Registry air NSR permits -> permit records + events.
+Derived  — stage classifier: both sources -> a lifecycle position per project.
 """
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import date
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.classify import NoDataError, Stage, run_classification, run_labels, run_momentum
+from app.classify import store as classify_store
 from app.config import get_settings
 from app.db import TABLE, get_client
 from app.discovery import discover
@@ -275,3 +279,226 @@ def list_projects(
     )
     resp = q.execute()
     return {"count": resp.count, "limit": limit, "offset": offset, "results": resp.data}
+
+
+# ---------------------------------------------------------------------------
+# Stage classifier
+#
+# The classifier reads what the two discovery sources already persisted, so it
+# has no fetch step of its own — POST /classify is pure computation over
+# ercot_projects + tceq_permits + resolved_links.
+# ---------------------------------------------------------------------------
+def _classify_client():
+    settings = get_settings()
+    if not settings.supabase_configured:
+        raise HTTPException(
+            status_code=400,
+            detail="Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_KEY.",
+        )
+    return get_client(settings)
+
+
+def _as_of(value: str | None) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"as_of must be YYYY-MM-DD, got {value!r}"
+        ) from exc
+
+
+@app.post("/classify")
+def classify(
+    as_of: str | None = Query(
+        None,
+        description="Reconstruct what was knowable at this date, YYYY-MM-DD. "
+        "Defaults to the newest report month.",
+    ),
+    persist: bool = Query(True, description="Write model_runs + stage_predictions"),
+    include_momentum: bool = Query(True, description="Also write project_momentum"),
+    alpha: float = Query(
+        0.10,
+        gt=0.0,
+        lt=1.0,
+        description="Conformal miscoverage rate: intervals cover the true stage "
+        "at least (1 - alpha) of the time",
+    ),
+    seed: int = Query(20260808, description="Split and solver seed"),
+    notes: str | None = Query(None, description="Free text stored on the model run"),
+):
+    """Label with the rules, fit, calibrate, score every project, and persist.
+
+    Training and scoring happen in one pass, so the model never has to be
+    written to disk. `model_version` is a content hash of the training inputs:
+    re-running on unchanged data reproduces the same version rather than
+    stacking near-identical model rows.
+
+    `persist=false` runs everything and returns the summary without writing —
+    the fast way to check the weak labels before committing to a model run.
+    """
+    client = _classify_client()
+    try:
+        return run_classification(
+            client,
+            as_of=_as_of(as_of),
+            alpha=alpha,
+            seed=seed,
+            notes=notes,
+            persist=persist,
+            include_momentum=include_momentum,
+        )
+    except NoDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:  # not enough usable labels to train on
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/classify/labels")
+def classify_labels(
+    as_of: str | None = Query(None, description="YYYY-MM-DD; defaults to the newest report"),
+):
+    """Weak-label coverage without training. Read-only.
+
+    Worth reading before every run: `missing_stages` lists the classes no rule
+    can label, and those can never be predicted no matter how the model scores.
+    """
+    client = _classify_client()
+    try:
+        return run_labels(client, as_of=_as_of(as_of))
+    except NoDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/classify/momentum")
+def classify_momentum(
+    as_of: str | None = Query(None, description="YYYY-MM-DD; defaults to the newest report"),
+    persist: bool = Query(True, description="Upsert into project_momentum"),
+):
+    """Recompute the snapshot-series metrics on their own, without training."""
+    client = _classify_client()
+    try:
+        return run_momentum(client, as_of=_as_of(as_of), persist=persist)
+    except NoDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/stages")
+def list_stages(
+    stage: str | None = Query(
+        None, description="Lifecycle stage: " + " | ".join(s.value for s in Stage)
+    ),
+    as_of: str | None = Query(None, description="Snapshot date, YYYY-MM-DD"),
+    model_version: str | None = Query(None, description="Defaults to whatever is stored"),
+    min_confidence: float | None = Query(
+        None, ge=0.0, le=1.0, description="Calibrated probability of the top class"
+    ),
+    limit: int = Query(100, le=1000),
+    offset: int = 0,
+):
+    """Stored stage predictions, newest and most confident first.
+
+    `confidence` is calibrated, so 0.7 means roughly seven in ten right. Pair it
+    with `margin` before trusting a call: 0.5 confidence with 0.45 margin is
+    decisive, 0.5 with 0.02 is a coin flip between two adjacent stages.
+    """
+    if stage and stage not in {s.value for s in Stage}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stage must be one of: {', '.join(s.value for s in Stage)}",
+        )
+
+    client = _classify_client()
+    try:
+        results = classify_store.fetch_predictions(
+            client,
+            stage=stage,
+            as_of=_as_of(as_of),
+            model_version=model_version,
+            min_confidence=min_confidence,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {"limit": limit, "offset": offset, "results": results}
+
+
+@app.get("/momentum")
+def list_momentum(
+    grade: str | None = Query(
+        None, description="accelerating | on_track | slipping | stalled | unknown"
+    ),
+    as_of: str | None = Query(None, description="Snapshot date, YYYY-MM-DD"),
+    limit: int = Query(100, le=1000),
+    offset: int = 0,
+):
+    """Stored momentum metrics.
+
+    `cod_slip_rate` is the number to read: ~0 holding schedule, ~1 slipping a
+    month per month, negative pulling in. Null below three snapshots, because
+    "cannot tell yet" is not "not moving".
+    """
+    client = _classify_client()
+    try:
+        results = classify_store.fetch_momentum(
+            client, grade=grade, as_of=_as_of(as_of), limit=limit, offset=offset
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {"limit": limit, "offset": offset, "results": results}
+
+
+@app.get("/projects/{inr}/stage")
+def project_stage(inr: str):
+    """Everything the classifier knows about one project.
+
+    Returns the newest prediction, its momentum row, and the rule the weak label
+    came from — so a disagreement between rule and model is visible here rather
+    than only in aggregate.
+    """
+    client = _classify_client()
+    try:
+        predictions = classify_store.fetch_predictions(client, inr=inr, limit=1)
+        momentum = classify_store.fetch_momentum(client, inr=inr, limit=1)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if not predictions:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no stage prediction for {inr} — run POST /classify first",
+        )
+
+    prediction = predictions[0]
+    return {
+        "inr": inr,
+        "entity_id": prediction["entity_id"],
+        "as_of": prediction["as_of"],
+        "stage": prediction["stage"],
+        "label_source": prediction["label_source"],
+        "rule_stage": prediction["rule_stage"],
+        "agrees_with_rule": prediction["rule_stage"] is None
+        or prediction["rule_stage"] == prediction["stage"],
+        "confidence": prediction["confidence"],
+        "margin": prediction["margin"],
+        "entropy": prediction["entropy"],
+        "expected_rank": prediction["expected_rank"],
+        "conformal_range": [prediction["conformal_lo"], prediction["conformal_hi"]],
+        "conformal_alpha": prediction["conformal_alpha"],
+        "withdrawn": prediction["withdrawn"],
+        "probabilities": prediction["probabilities"],
+        "contributions": prediction["contributions"],
+        "justification": prediction["justification"],
+        "model_version": prediction["model_version"],
+        "momentum": momentum[0] if momentum else None,
+    }
